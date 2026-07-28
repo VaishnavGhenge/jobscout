@@ -1,0 +1,37 @@
+name: Refresh job boards
+
+# Vercel's Hobby plan only allows daily cron, which is too coarse for a search
+# where "posted in the last 3 days" is the highest-scoring signal. GitHub
+# Actions schedules for free at a much finer granularity, so it does the ticking
+# and Vercel just serves the endpoints.
+on:
+  schedule:
+    - cron: "0 */6 * * *" # every 6 hours
+  workflow_dispatch: {}
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Queue every board
+        run: |
+          curl -sS -X POST \
+            -H "authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            "${{ secrets.JOBSCOUT_URL }}/api/queue/enqueue" | head -c 400
+          echo
+
+      # One worker invocation is time-boxed by the serverless limit, so drive it
+      # until the queue reports nothing left to claim. This loop is the "chain":
+      # doing it here, where a run may take minutes, is far simpler than trying
+      # to make a serverless function hand off to itself.
+      - name: Drain the queue
+        run: |
+          for i in $(seq 1 10); do
+            remaining=$(curl -sS -X POST \
+              -H "authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+              "${{ secrets.JOBSCOUT_URL }}/api/queue/work" \
+              | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('remaining', 0)); print(d, file=sys.stderr)")
+            echo "round $i — remaining: $remaining"
+            [ "$remaining" = "0" ] && break
+            sleep 5
+          done
