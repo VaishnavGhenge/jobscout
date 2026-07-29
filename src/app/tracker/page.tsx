@@ -9,8 +9,10 @@ import {
   pct,
   GHOST_AFTER_DAYS,
 } from "@/lib/insights";
+import { isManualSource } from "@/lib/sources";
 import { daysSince } from "@/lib/time";
 import { markReplied, removeApplication } from "../actions";
+import { ApplicationDialog } from "./ApplicationDialog";
 import { StatusSelect } from "./StatusSelect";
 import { SubmitButton } from "../SubmitButton";
 
@@ -54,9 +56,12 @@ export default async function TrackerPage() {
             Your pipeline, and how long each side has been waiting on the other.
           </p>
         </div>
-        <Link className="btn ghost" href="/insights">
-          Insights →
-        </Link>
+        <div className="rowbar-actions">
+          <ApplicationDialog label="+ Add manually" className="btn" />
+          <Link className="btn ghost" href="/insights">
+            Insights →
+          </Link>
+        </div>
       </div>
 
       {funnel.applied > 0 && (
@@ -86,8 +91,11 @@ export default async function TrackerPage() {
 
       {apps.length === 0 ? (
         <div className="empty">
-          Nothing tracked yet. Go to the <strong>Board</strong> and hit{" "}
-          <strong>+ Track</strong> on roles you like.
+          <p>
+            Nothing tracked yet. Hit <strong>+ Track</strong> on the{" "}
+            <strong>Board</strong>, or add one you applied to elsewhere.
+          </p>
+          <ApplicationDialog label="+ Add manually" />
         </div>
       ) : (
         <div className="board">
@@ -105,17 +113,24 @@ export default async function TrackerPage() {
                   const replied = hasReplied(a);
                   return (
                     <div className={`card${ghosted ? " ghosted" : ""}`} key={a.id}>
-                      <a
-                        className="co"
-                        href={a.url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                      >
-                        {a.company}
-                      </a>
+                      {a.url ? (
+                        <a
+                          className="co"
+                          href={a.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                        >
+                          {a.company}
+                        </a>
+                      ) : (
+                        <span className="co">{a.company}</span>
+                      )}
                       <div className="ti">{a.title}</div>
 
                       <div className="card-tags">
+                        {isManualSource(a.source) && (
+                          <span className="badge">{a.source}</span>
+                        )}
                         {a.eligibility !== "eligible" && (
                           <span className={`badge elig ${a.eligibility}`}>
                             {a.eligibility}
@@ -132,12 +147,21 @@ export default async function TrackerPage() {
                         ) : null}
                       </div>
 
+                      {a.notes && <p className="card-note">{a.notes}</p>}
+
                       <StatusSelect id={a.id} status={a.status} />
 
                       <div className="card-row">
-                        <a href={a.url} target="_blank" rel="noopener noreferrer">
-                          Open ↗
-                        </a>
+                        {a.url && (
+                          <a href={a.url} target="_blank" rel="noopener noreferrer">
+                            Open ↗
+                          </a>
+                        )}
+                        <ApplicationDialog
+                          app={a}
+                          label="Edit"
+                          className="linkbtn edit"
+                        />
                         {a.appliedAt && !replied && (
                           <form action={markReplied}>
                             <input type="hidden" name="id" value={a.id} />

@@ -45,6 +45,38 @@ export const companies: Company[] = [
   { name: "CRED", ats: "lever", token: "cred", hiresIn: ["india"], tags: ["fintech", "india"] },
   { name: "Postman", ats: "greenhouse", token: "postman", hiresIn: ["india", "us", "eu"], tags: ["devtools", "india"] },
   { name: "Freshworks", ats: "smartrecruiters", token: "Freshworks", hiresIn: ["india", "us", "uk", "eu"], tags: ["saas", "india"] },
+  { name: "Meesho", ats: "lever", token: "meesho", hiresIn: ["india"], tags: ["consumer", "india"] },
+  { name: "Zeta", ats: "lever", token: "zeta", hiresIn: ["india"], tags: ["fintech", "india"] },
+  { name: "Sarvam AI", ats: "ashby", token: "sarvam", hiresIn: ["india"], tags: ["ai", "india"] },
+  { name: "Hevo Data", ats: "lever", token: "hevodata", hiresIn: ["india"], tags: ["data", "india"] },
+  { name: "Atlan", ats: "ashby", token: "atlan", hiresIn: ["india"], tags: ["data", "india"] },
+  { name: "Swiggy", ats: "smartrecruiters", token: "Swiggy", hiresIn: ["india"], tags: ["consumer", "india"] },
+  { name: "Fi Money", ats: "lever", token: "epifi", hiresIn: ["india"], tags: ["fintech", "india"] },
+  { name: "Tekion", ats: "greenhouse", token: "tekion", hiresIn: ["india", "us"], tags: ["saas", "india"] },
+  { name: "Druva", ats: "greenhouse", token: "druva", hiresIn: ["us", "india", "uk"], tags: ["saas", "india"] },
+
+  // Global product companies with real India engineering centres. These are the
+  // ones that pay above the local market without needing a visa.
+  { name: "Okta", ats: "greenhouse", token: "okta", hiresIn: ["us", "india", "canada", "eu", "apac", "uk", "latam"], tags: ["security", "saas"] },
+  { name: "Zscaler", ats: "greenhouse", token: "zscaler", hiresIn: ["us", "india", "apac", "eu", "uk", "canada"], tags: ["security"] },
+  { name: "Twilio", ats: "greenhouse", token: "twilio", hiresIn: ["us", "india", "latam", "eu", "uk", "apac", "canada"], tags: ["saas", "api"] },
+  { name: "Harness", ats: "greenhouse", token: "harnessinc", hiresIn: ["us", "india", "uk", "eu"], tags: ["devtools"] },
+  { name: "Netskope", ats: "greenhouse", token: "netskope", hiresIn: ["us", "apac", "india", "eu", "latam", "canada"], tags: ["security"] },
+  { name: "Fivetran", ats: "greenhouse", token: "fivetran", hiresIn: ["us", "eu", "india", "uk", "apac", "canada"], tags: ["data"] },
+  { name: "SingleStore", ats: "greenhouse", token: "singlestore", hiresIn: ["us", "india", "eu"], tags: ["database"] },
+  { name: "Couchbase", ats: "greenhouse", token: "couchbaseinc", hiresIn: ["us", "india", "uk", "apac"], tags: ["database"] },
+  { name: "Yugabyte", ats: "greenhouse", token: "yugabyte", hiresIn: ["india", "us"], tags: ["database", "postgres"] },
+  { name: "Commvault", ats: "greenhouse", token: "commvault", hiresIn: ["us", "apac", "eu", "india", "mena", "uk"], tags: ["saas"] },
+  { name: "Rubrik", ats: "greenhouse", token: "rubrik", hiresIn: ["us", "india", "eu", "uk", "apac", "amer", "mena"], tags: ["infra"] },
+  { name: "Adyen", ats: "greenhouse", token: "adyen", hiresIn: ["us", "eu", "apac", "latam", "india", "uk"], tags: ["fintech"] },
+  { name: "Airbnb", ats: "greenhouse", token: "airbnb", hiresIn: ["us", "apac", "eu", "canada", "latam", "india", "uk"], tags: ["consumer"] },
+  { name: "Agoda", ats: "greenhouse", token: "agoda", hiresIn: ["apac", "india", "mena", "us", "canada"], tags: ["consumer", "travel"] },
+  { name: "Turing", ats: "greenhouse", token: "turing", hiresIn: ["us", "india", "latam"], tags: ["ai", "remote"] },
+
+  // Quant / trading — small India headcount, but the top of the pay band.
+  { name: "Tower Research", ats: "greenhouse", token: "towerresearchcapital", hiresIn: ["apac", "us", "india", "uk", "canada"], tags: ["quant", "fintech"] },
+  { name: "Squarepoint", ats: "greenhouse", token: "squarepointcapital", hiresIn: ["us", "india", "canada", "uk", "apac"], tags: ["quant", "fintech"] },
+  { name: "IMC Trading", ats: "greenhouse", token: "imc", hiresIn: ["us", "eu", "apac", "india", "uk"], tags: ["quant", "fintech"] },
 
   // Fintech
   { name: "Stripe", ats: "greenhouse", token: "stripe", hiresIn: ["india", "us", "canada", "uk", "eu", "apac"], tags: ["fintech"] },

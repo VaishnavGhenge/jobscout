@@ -48,6 +48,12 @@ export const jobs = pgTable(
     reasons: jsonb("reasons").$type<string[]>().notNull().default([]),
     eligibility: eligibilityLevel("eligibility").notNull().default("longshot"),
     eligibilityReason: text("eligibility_reason").notNull().default(""),
+    /**
+     * Stated pay band, e.g. "₹25L–35L" or "$150k–200k". Null when the posting
+     * doesn't publish one, which is most of them — that means "unknown", never
+     * "pays badly", which is why nothing scores on it.
+     */
+    compLabel: text("comp_label"),
     /** Description phrases that would screen you out (visa, clearance, …). */
     blockers: jsonb("blockers").$type<string[]>().notNull().default([]),
     regions: jsonb("regions").$type<string[]>().notNull().default([]),

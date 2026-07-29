@@ -94,12 +94,28 @@ const ENTITIES: Record<string, string> = {
   "&#39;": "'",
   "&apos;": "'",
   "&nbsp;": " ",
+  // Dashes matter more than they look: ATS pay-range markup separates the two
+  // ends of a salary band with a bare `&mdash;`, so leaving it encoded turns
+  // "$108,400 — $129,600" into something no range parser can read.
+  "&mdash;": "—",
+  "&ndash;": "–",
+  "&hellip;": "…",
+  "&lsquo;": "'",
+  "&rsquo;": "'",
+  "&ldquo;": '"',
+  "&rdquo;": '"',
+  "&bull;": "•",
+  "&middot;": "·",
 };
 
 function decodeEntities(s: string): string {
   return s
-    .replace(/&(?:lt|gt|amp|quot|#39|apos|nbsp);/g, (m) => ENTITIES[m] ?? m)
-    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)));
+    .replace(
+      /&(?:lt|gt|amp|quot|#39|apos|nbsp|mdash|ndash|hellip|lsquo|rsquo|ldquo|rdquo|bull|middot);/g,
+      (m) => ENTITIES[m] ?? m,
+    )
+    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCharCode(parseInt(n, 16)));
 }
 
 /**

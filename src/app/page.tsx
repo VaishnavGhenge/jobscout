@@ -252,6 +252,11 @@ export default async function BoardPage({
                       {j.eligibility}
                     </span>
                     {j.remote && <span className="badge remote">remote</span>}
+                    {j.compLabel && (
+                      <span className="badge pay" title="Pay band stated in the posting">
+                        {j.compLabel}
+                      </span>
+                    )}
                     <span className="badge src">{j.source}</span>
                     {j.reasons
                       .filter((r) => !r.startsWith("blocked:"))

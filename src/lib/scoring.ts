@@ -1,5 +1,6 @@
 import { profile } from "./profile";
 import { assessEligibility, type Eligibility } from "./eligibility";
+import { parseComp } from "./comp";
 import { daysSince } from "./time";
 import type { Company } from "./companies";
 import type { RawPosting } from "./connectors";
@@ -13,6 +14,8 @@ export interface Scored {
   blockers: string[];
   regions: Region[];
   ageDays: number | null;
+  /** Stated pay band, when the posting publishes one. Never scored — see comp.ts. */
+  compLabel: string | null;
 }
 
 const includesAny = (haystack: string, needles: readonly string[]) =>
@@ -78,16 +81,30 @@ export function scoreJob(job: RawPosting, company: Company): Scored {
     reasons.push(`role match: ${roleHits[0]}`);
   }
 
-  const avoidHits = matchesAny(title, profile.seniorityAvoid);
+  // --- Level band -----------------------------------------------------------
+  // Exactly one tier applies, worst-first: "Lead Software Engineer II" is a
+  // lead role that happens to carry a II, not a role in your band.
+  const avoidHits = matchesAny(title, profile.seniority.avoid);
+  const stretchHits = matchesAny(title, profile.seniority.stretch);
+  const targetHits = matchesAny(title, profile.seniority.target);
   if (avoidHits.length) {
     score += w.levelAvoid;
     reasons.push(`off-level: ${avoidHits.join(", ")}`);
+  } else if (stretchHits.length) {
+    score += w.levelStretch;
+    reasons.push(`stretch level: ${stretchHits[0]}`);
+  } else if (targetHits.length) {
+    score += w.levelMatch;
+    reasons.push(`target level: ${targetHits[0]}`);
   }
 
-  const prefHits = matchesAny(title, profile.seniorityPreferred);
-  if (prefHits.length) {
-    score += w.levelMatch;
-    reasons.push(`target level: ${prefHits[0]}`);
+  // An adjacent discipline is a real engineering job, just not the one you do.
+  // Word-boundary matched, not substring: "ios" lives inside "kiosk" and
+  // "scenarios", and a plain `includes` would flag both.
+  const offStackHits = matchesAny(title, profile.offStackDomains);
+  if (offStackHits.length) {
+    score += w.offStack;
+    reasons.push(`off-stack: ${offStackHits[0]}`);
   }
 
   // Prefer stack in the title (a deliberate signal) over stack in the body
@@ -116,6 +133,7 @@ export function scoreJob(job: RawPosting, company: Company): Scored {
     blockers: assessment.blockers,
     regions: assessment.regions,
     ageDays,
+    compLabel: parseComp(job.description)?.label ?? null,
   };
 }
 

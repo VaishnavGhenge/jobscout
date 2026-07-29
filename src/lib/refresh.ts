@@ -96,6 +96,7 @@ export async function refreshCompany(
       reasons: scored.reasons,
       eligibility: scored.eligibility,
       eligibilityReason: scored.eligibilityReason,
+      compLabel: scored.compLabel,
       blockers: scored.blockers,
       regions: scored.regions,
       firstSeenAt: firstSeen.get(p.externalId) ?? now,

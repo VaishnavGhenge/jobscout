@@ -51,36 +51,83 @@ export const profile = {
     "graphql",
   ],
 
-  // Level you're targeting (SDE-2 / mid). Positive when present.
-  // Matched on word boundaries, so "ii" hits "Engineer II" but not "VIII".
-  seniorityPreferred: [
-    "ii",
-    "2",
-    "mid",
-    "mid-level",
-    "sde 2",
-    "sde-2",
-    "sde ii",
-    "intermediate",
-  ],
+  /**
+   * Your level, as a band rather than a single target — you'd take SDE-1 or
+   * SDE-2, a Senior req is a stretch worth seeing but not worth ranking first,
+   * and anything above that is a waste of an application at 2 YOE.
+   *
+   * All three lists are matched on word boundaries against the *title*, so "ii"
+   * hits "Engineer II" but not "VIII", and "lead" catches "Lead Engineer"
+   * without firing on "leadership".
+   */
+  seniority: {
+    /** Squarely your band. */
+    target: [
+      "i",
+      "1",
+      "sde 1",
+      "sde-1",
+      "sde i",
+      "ii",
+      "2",
+      "sde 2",
+      "sde-2",
+      "sde ii",
+      "mid",
+      "mid-level",
+      "intermediate",
+      "associate",
+    ],
+    /**
+     * Reachable on a good day, but most "Senior" reqs in this market want 5+
+     * years. Penalized enough to sit below your own band, not enough to vanish
+     * — some companies grade Senior at 3-4 years and those are worth seeing.
+     */
+    stretch: ["senior", "sr", "iii", "3"],
+    /** Not happening at 2 YOE, or not an IC role at all. */
+    avoid: [
+      "intern",
+      "internship",
+      "graduate",
+      "new grad",
+      "principal",
+      "staff",
+      "distinguished",
+      "director",
+      "vp",
+      "head of",
+      "manager",
+      "lead",
+      "architect",
+      "fellow",
+      "iv",
+      "v",
+    ],
+  },
 
-  // Levels that aren't your target right now. Strong negative.
-  // Also word-boundary matched — "lead" has to catch "Lead, Engineering" and
-  // "Lead Engineer" without firing on "leadership" or "leading".
-  seniorityAvoid: [
-    "intern",
-    "internship",
-    "graduate",
-    "new grad",
-    "principal",
-    "staff",
-    "director",
-    "vp",
-    "head of",
-    "manager",
-    "lead",
-    "architect",
-    "fellow",
+  /**
+   * Adjacent engineering disciplines. Not your stack, but close enough that the
+   * title sails through every other filter — "Senior Software Engineer - Mobile
+   * (Android)" scores identically to a backend role without this. Ranked down
+   * rather than dropped, so they're still there if you want to browse them.
+   */
+  offStackDomains: [
+    "android",
+    "ios",
+    "mobile",
+    "react native",
+    "flutter",
+    "swift",
+    "kotlin",
+    "embedded",
+    "firmware",
+    "hardware",
+    "machine learning",
+    "data scientist",
+    "data science",
+    "data engineer",
+    "analytics engineer",
+    "computer vision",
   ],
 
   /**
@@ -127,8 +174,12 @@ export const profile = {
     base: 30,
     roleMatch: 12,
     levelMatch: 12,
+    /** Senior: still shown, but never above a role in your own band. */
+    levelStretch: -12,
     levelAvoid: -40,
     techMatch: 6,
+    /** Adjacent discipline (mobile, ML, data) — a real role, just not yours. */
+    offStack: -15,
     eligible: 25,
     longshot: -10,
     /** Blocked roles can never score above this, so they sink regardless. */
@@ -139,24 +190,81 @@ export const profile = {
 
   /**
    * Titles that contain "engineer" but aren't software engineering jobs. These
-   * are customer-facing and sales roles; without this list they sail through
-   * the gate and clutter the top of the board.
+   * are customer-facing, sales, QA and IT roles; without this list they sail
+   * through the gate and clutter the top of the board. Dropped on refresh, not
+   * merely ranked down — they were never applications you'd send.
    */
   titleExclusions: [
+    // Sales / pre-sales / customer-facing
     "customer engineer",
     "solutions engineer",
     "solution engineer",
     "sales engineer",
+    "inside sales",
     "field engineer",
     "presales",
     "pre-sales",
     "solutions architect",
     "solution architect",
+    "solutions consultant",
     "technical account",
+    "technical services",
+    "demo engineer",
+    "escalation engineer",
+    "support engineer",
+    "support specialist",
+    "designated support",
+    "implementation engineer",
+    "implementation consultant",
+    "implementation specialist",
+    "professional services",
+    "business solutions",
+    "customer success",
+    "forward deployed",
+    "developer advocate",
+    "developer relations",
+    "developer content",
+    "gtm",
+
+    // QA / test — a separate discipline and career track
+    "qa engineer",
+    "quality engineer",
+    "quality assurance",
+    "test engineer",
+    "engineer in test",
+    "sdet",
+    "automation engineer",
+
+    // Business systems dressed up as engineering
+    "salesforce",
+    "workday",
+    "netsuite",
+    "sap ",
+    "business intelligence",
+    "business systems",
+    "bus sys",
+    "bizops",
+    "biztech",
+
+    // Security operations (not product/appsec engineering)
+    "incident response",
+    "threat intelligence",
+    "security operations",
+    "soc analyst",
+
+    // Management / non-IC / not a job posting at all
     "engineering manager",
     "director of engineering",
+    "product manager",
+    "program manager",
+    "developer marketing",
+    "operations analyst",
     "recruiter",
     "sourcer",
+    /** Evergreen "join our talent pool" listings — no req behind them. */
+    "talent community",
+    "talent pool",
+    "general application",
   ],
 
   // Titles kept in the DB at all. Anything not matching these is dropped on

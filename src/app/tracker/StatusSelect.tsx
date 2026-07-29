@@ -3,7 +3,7 @@
 import { setStatus } from "../actions";
 import type { ApplicationStatus } from "@/db/schema";
 
-const OPTIONS: { key: ApplicationStatus; label: string }[] = [
+export const STATUS_OPTIONS: { key: ApplicationStatus; label: string }[] = [
   { key: "saved", label: "Saved" },
   { key: "applied", label: "Applied" },
   { key: "interviewing", label: "Interviewing" },
@@ -26,7 +26,7 @@ export function StatusSelect({
         defaultValue={status}
         onChange={(e) => e.currentTarget.form?.requestSubmit()}
       >
-        {OPTIONS.map((c) => (
+        {STATUS_OPTIONS.map((c) => (
           <option key={c.key} value={c.key}>
             {c.label}
           </option>

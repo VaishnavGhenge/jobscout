@@ -189,12 +189,25 @@ Everything is in `src/lib/profile.ts`:
   ("we do not sponsor", "must be authorized to work in the United States").
 - `freshness` — how hard to penalise old postings.
 - `weights` — relative pull of eligibility, freshness, level and stack.
-- `roleKeywords` / `seniorityPreferred` / `seniorityAvoid` — titles and level.
-  Matched on word boundaries, so `lead` catches "Lead, Engineering" but not
-  "leadership".
+- `roleKeywords` — titles that signal a role you'd take.
+- `seniority` — your level as a band, not a point: `target` (your own band),
+  `stretch` (Senior — shown, but never above your band), `avoid` (Staff and up,
+  plus non-IC). Exactly one tier applies per title, worst-first, so "Lead
+  Software Engineer II" is scored as a lead role rather than a II. Matched on
+  word boundaries, so `lead` catches "Lead, Engineering" but not "leadership",
+  and `ii` catches "Engineer II" but not "VIII".
+- `offStackDomains` — adjacent disciplines (mobile, ML, data). Ranked down, not
+  dropped: real engineering jobs, just not the one you do.
 - `titleExclusions` — titles containing "engineer" that aren't software jobs
-  (Customer Engineer, Solutions Engineer).
+  (Customer Engineer, QA Engineer, Demo Engineer, Salesforce). Dropped on
+  refresh, never scored.
 - `engineeringGate` — which titles are kept in the DB at all.
+
+Pay bands are parsed out of descriptions by `src/lib/comp.ts` and shown as a
+badge, but deliberately **not** scored: most postings state nothing, so ranking
+on it would sort by disclosure rather than by pay. Roughly a third of postings
+publish a band, and nearly all of those are US roles subject to pay-transparency
+law — Coinbase is one of the few that publishes INR bands for India.
 
 ### Keeping `hiresIn` honest
 

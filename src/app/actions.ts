@@ -55,6 +55,78 @@ export async function trackJob(formData: FormData): Promise<void> {
 }
 
 /**
+ * Create or edit an application by hand — the ones you sent through LinkedIn,
+ * Wellfound or a referral, which no connector will ever scrape.
+ *
+ * With an `id` this edits; without one it inserts. Manual rows get a generated
+ * `externalId` because the table is unique on (source, externalId) and every
+ * hand-added row needs its own key.
+ */
+export async function saveApplication(formData: FormData): Promise<void> {
+  const db = requireDb();
+  const str = (k: string) => String(formData.get(k) ?? "").trim();
+
+  const company = str("company");
+  const title = str("title");
+  if (!company && !title) return;
+
+  const rawId = str("id");
+  const id = rawId ? Number(rawId) : null;
+  const status = (str("status") || "saved") as ApplicationStatus;
+  const source = str("source");
+
+  // A date input gives "2026-07-24". Pin it to UTC midnight so the value reads
+  // back as the same day on both the server and the browser — a local-midnight
+  // stamp renders as two different dates in the two places.
+  const appliedOn = str("appliedAt");
+  const appliedAt = appliedOn
+    ? new Date(`${appliedOn}T00:00:00Z`)
+    : status === "applied" || IMPLIES_RESPONSE.includes(status)
+      ? new Date()
+      : null;
+
+  const fields = {
+    company,
+    title,
+    url: str("url"),
+    status,
+    notes: str("notes"),
+    location: str("location"),
+    remote: formData.get("remote") === "on",
+    eligibility: (str("eligibility") || "eligible") as EligibilityLevel,
+    appliedAt,
+  };
+
+  if (id) {
+    await db
+      .update(applications)
+      .set({
+        ...fields,
+        // Only manual rows expose a source input. Leaving a scraped row's
+        // (source, externalId) alone is what keeps the board still showing it
+        // as tracked.
+        ...(source ? { source } : {}),
+        ...(IMPLIES_RESPONSE.includes(status)
+          ? {
+              firstResponseAt: sql`coalesce(${applications.firstResponseAt}, now())`,
+            }
+          : {}),
+        updatedAt: sql`now()`,
+      })
+      .where(eq(applications.id, id));
+  } else {
+    await db.insert(applications).values({
+      ...fields,
+      source: source || "other",
+      externalId: crypto.randomUUID(),
+      firstResponseAt: IMPLIES_RESPONSE.includes(status) ? new Date() : null,
+    });
+  }
+
+  revalidateAll();
+}
+
+/**
  * Move an application through the pipeline, stamping the dates that make
  * response rate measurable. Both stamps use COALESCE so the *first* time you
  * reached a state is what's recorded, even if you flip statuses later.
@@ -92,17 +164,6 @@ export async function markReplied(formData: FormData): Promise<void> {
     })
     .where(eq(applications.id, id));
   revalidateAll();
-}
-
-export async function updateNotes(formData: FormData): Promise<void> {
-  const db = requireDb();
-  const id = Number(formData.get("id"));
-  const notes = String(formData.get("notes") ?? "");
-  await db
-    .update(applications)
-    .set({ notes, updatedAt: sql`now()` })
-    .where(eq(applications.id, id));
-  revalidatePath("/tracker");
 }
 
 export async function removeApplication(formData: FormData): Promise<void> {
