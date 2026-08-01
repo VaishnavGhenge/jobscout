@@ -630,6 +630,13 @@ label.check input {
   font-weight: 500;
   font-variant-numeric: tabular-nums;
 }
+/* Experience ask. Same weight as pay: a stated fact, not a verdict — the
+   posting's number is often negotiable and the badge shouldn't imply otherwise. */
+.badge.yoe {
+  color: var(--paper);
+  border-color: rgba(242, 239, 233, 0.2);
+  font-variant-numeric: tabular-nums;
+}
 .badge.new {
   background: var(--paper);
   border-color: var(--paper);

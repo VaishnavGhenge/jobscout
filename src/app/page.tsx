@@ -14,6 +14,7 @@ import { db } from "@/db/client";
 import { jobs, applications } from "@/db/schema";
 import { companies } from "@/lib/companies";
 import { ageLabel, daysSince, timeAgo } from "@/lib/time";
+import { formatYoe } from "@/lib/yoe";
 import { queueSnapshot } from "@/lib/queue";
 import { refreshNow, trackJob } from "./actions";
 import { SubmitButton } from "./SubmitButton";
@@ -255,6 +256,14 @@ export default async function BoardPage({
                     {j.compLabel && (
                       <span className="badge pay" title="Pay band stated in the posting">
                         {j.compLabel}
+                      </span>
+                    )}
+                    {j.yoeMin !== null && (
+                      <span
+                        className="badge yoe"
+                        title="Experience the posting asks for. Not scored — plenty of these hire under the stated bar."
+                      >
+                        {formatYoe(j.yoeMin, j.yoeMax)}
                       </span>
                     )}
                     <span className="badge src">{j.source}</span>

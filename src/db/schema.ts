@@ -54,6 +54,15 @@ export const jobs = pgTable(
      * "pays badly", which is why nothing scores on it.
      */
     compLabel: text("comp_label"),
+    /**
+     * Years of experience the posting asks for. Null when it doesn't say, which
+     * is roughly a third of them — "unknown", never "no requirement". Stored as
+     * numbers rather than a label so it can be filtered on later; see lib/yoe.ts
+     * for why it stays out of scoring.
+     */
+    yoeMin: integer("yoe_min"),
+    /** Upper bound when a range is stated ("3-5 years"), else null. */
+    yoeMax: integer("yoe_max"),
     /** Description phrases that would screen you out (visa, clearance, …). */
     blockers: jsonb("blockers").$type<string[]>().notNull().default([]),
     regions: jsonb("regions").$type<string[]>().notNull().default([]),

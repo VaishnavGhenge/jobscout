@@ -1,6 +1,7 @@
 import { profile } from "./profile";
 import { assessEligibility, type Eligibility } from "./eligibility";
 import { parseComp } from "./comp";
+import { parseYoe } from "./yoe";
 import { daysSince } from "./time";
 import type { Company } from "./companies";
 import type { RawPosting } from "./connectors";
@@ -16,6 +17,9 @@ export interface Scored {
   ageDays: number | null;
   /** Stated pay band, when the posting publishes one. Never scored — see comp.ts. */
   compLabel: string | null;
+  /** Stated experience requirement. Never scored — see yoe.ts. */
+  yoeMin: number | null;
+  yoeMax: number | null;
 }
 
 const includesAny = (haystack: string, needles: readonly string[]) =>
@@ -119,6 +123,10 @@ export function scoreJob(job: RawPosting, company: Company): Scored {
     reasons.push(`stack in JD: ${bodyTech.slice(0, 3).join(", ")}`);
   }
 
+  // Extracted for display only: a stated "5+ years" is a wish, not a gate, and
+  // ranking on it would bury roles that are worth an application anyway.
+  const yoe = parseYoe(job.description);
+
   // A role you can't be hired for is never a good application, however well the
   // title fits — cap it so it sinks below everything actionable.
   const ceiling =
@@ -134,6 +142,8 @@ export function scoreJob(job: RawPosting, company: Company): Scored {
     regions: assessment.regions,
     ageDays,
     compLabel: parseComp(job.description)?.label ?? null,
+    yoeMin: yoe?.min ?? null,
+    yoeMax: yoe?.max ?? null,
   };
 }
 
