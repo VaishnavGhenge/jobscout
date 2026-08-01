@@ -4,9 +4,15 @@ name: Refresh job boards
 # where "posted in the last 3 days" is the highest-scoring signal. GitHub
 # Actions schedules for free at a much finer granularity, so it does the ticking
 # and Vercel just serves the endpoints.
+#
+# The schedule is off because the app isn't deployed — it runs locally, so there
+# is no public origin for a hosted runner to call and every tick failed on a
+# hostless URL. Refreshes happen from the app itself ("Refresh now") meanwhile.
+# To revive this: deploy behind auth, set JOBSCOUT_URL and CRON_SECRET as repo
+# secrets, then uncomment the schedule.
 on:
-  schedule:
-    - cron: "0 */6 * * *" # every 6 hours
+  # schedule:
+  #   - cron: "0 */6 * * *" # every 6 hours
   workflow_dispatch: {}
 
 jobs:
