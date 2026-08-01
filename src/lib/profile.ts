@@ -242,9 +242,28 @@ export const profile = {
     "sap ",
     "business intelligence",
     "business systems",
+    "information systems",
     "bus sys",
     "bizops",
     "biztech",
+
+    /**
+     * Internal IT and support desks. Deliberately *not* a bare "systems
+     * engineer": at infra companies that title is a real backend role, and
+     * "Distributed Systems Engineer" is squarely on-stack. Only the qualified
+     * forms are excluded.
+     *
+     * The leading spaces are load-bearing. These are substring-matched (see
+     * isEngineeringRole), and "it systems" without one also fires on
+     * "Credit Systems Engineer" — the same trap the "ios"/"kiosk" comment in
+     * scoring.ts describes.
+     */
+    " it systems",
+    " it operations",
+    " it support",
+    "service desk",
+    "helpdesk",
+    "desktop support",
 
     // Security operations (not product/appsec engineering)
     "incident response",
