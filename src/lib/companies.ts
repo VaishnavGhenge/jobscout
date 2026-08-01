@@ -54,6 +54,13 @@ export const companies: Company[] = [
   { name: "Fi Money", ats: "lever", token: "epifi", hiresIn: ["india"], tags: ["fintech", "india"] },
   { name: "Tekion", ats: "greenhouse", token: "tekion", hiresIn: ["india", "us"], tags: ["saas", "india"] },
   { name: "Druva", ats: "greenhouse", token: "druva", hiresIn: ["us", "india", "uk"], tags: ["saas", "india"] },
+  { name: "PhonePe", ats: "greenhouse", token: "phonepe", hiresIn: ["india"], tags: ["fintech", "india"] },
+  { name: "HackerRank", ats: "greenhouse", token: "hackerrank", hiresIn: ["india", "us", "uk"], tags: ["devtools", "india"] },
+  { name: "Mindtickle", ats: "lever", token: "mindtickle", hiresIn: ["india"], tags: ["saas", "india"] },
+  { name: "Observe.AI", ats: "greenhouse", token: "observeai", hiresIn: ["india", "us"], tags: ["ai", "india"] },
+  { name: "FamPay", ats: "lever", token: "fampay", hiresIn: ["india"], tags: ["fintech", "india"] },
+  { name: "Unacademy", ats: "smartrecruiters", token: "unacademy", hiresIn: ["india"], tags: ["edtech", "india"] },
+  { name: "Sumo Logic", ats: "greenhouse", token: "sumologic", hiresIn: ["india", "us", "eu", "latam"], tags: ["observability", "india"] },
 
   // Global product companies with real India engineering centres. These are the
   // ones that pay above the local market without needing a visa.
@@ -72,6 +79,15 @@ export const companies: Company[] = [
   { name: "Airbnb", ats: "greenhouse", token: "airbnb", hiresIn: ["us", "apac", "eu", "canada", "latam", "india", "uk"], tags: ["consumer"] },
   { name: "Agoda", ats: "greenhouse", token: "agoda", hiresIn: ["apac", "india", "mena", "us", "canada"], tags: ["consumer", "travel"] },
   { name: "Turing", ats: "greenhouse", token: "turing", hiresIn: ["us", "india", "latam"], tags: ["ai", "remote"] },
+  { name: "Confluent", ats: "ashby", token: "confluent", hiresIn: ["us", "india", "canada", "uk", "eu"], tags: ["data", "infra"] },
+  { name: "Snowflake", ats: "ashby", token: "snowflake", hiresIn: ["eu", "us", "apac", "uk", "india", "canada", "latam", "mena"], tags: ["data"] },
+  { name: "Abnormal Security", ats: "greenhouse", token: "abnormalsecurity", hiresIn: ["us", "india", "eu", "apac", "canada"], tags: ["security"] },
+  { name: "ZoomInfo", ats: "greenhouse", token: "zoominfo", hiresIn: ["us", "canada", "india", "eu", "uk"], tags: ["saas", "data"] },
+  { name: "Samsara", ats: "greenhouse", token: "samsara", hiresIn: ["us", "canada", "latam", "uk", "eu", "india", "apac"], tags: ["iot", "saas"] },
+  { name: "ServiceNow", ats: "smartrecruiters", token: "servicenow", hiresIn: ["us", "apac", "india", "eu"], tags: ["saas"] },
+  { name: "Notion", ats: "ashby", token: "notion", hiresIn: ["us", "apac", "eu", "india", "uk"], tags: ["saas", "productivity"] },
+  { name: "Workato", ats: "greenhouse", token: "workato", hiresIn: ["eu", "apac", "us", "india", "uk", "latam"], tags: ["saas", "automation"] },
+  { name: "Figma", ats: "greenhouse", token: "figma", hiresIn: ["us", "apac", "uk", "eu", "latam", "mena", "india"], tags: ["design", "saas"] },
 
   // Quant / trading — small India headcount, but the top of the pay band.
   { name: "Tower Research", ats: "greenhouse", token: "towerresearchcapital", hiresIn: ["apac", "us", "india", "uk", "canada"], tags: ["quant", "fintech"] },
@@ -103,6 +119,12 @@ export const companies: Company[] = [
   { name: "Linear", ats: "ashby", token: "linear", hiresIn: ["us", "uk", "eu"], tags: ["devtools"] },
   { name: "Highspot", ats: "lever", token: "highspot", hiresIn: ["india", "us", "canada", "uk"], tags: ["saas"] },
   { name: "Rippling", ats: "rippling", token: "rippling", hiresIn: ["india", "us", "canada", "uk"], tags: ["saas", "hr"] },
+  { name: "JFrog", ats: "greenhouse", token: "jfrog", hiresIn: ["mena", "india", "uk", "us", "apac", "eu"], tags: ["devtools"] },
+  { name: "Starburst", ats: "greenhouse", token: "starburst", hiresIn: ["us", "india", "eu"], tags: ["data"] },
+  { name: "Aerospike", ats: "greenhouse", token: "aerospike", hiresIn: ["us", "india", "mena", "uk", "apac"], tags: ["database"] },
+  { name: "Redis", ats: "ashby", token: "redis", hiresIn: ["us", "uk", "eu", "india", "canada", "mena"], tags: ["database"] },
+  { name: "Imply", ats: "greenhouse", token: "imply", hiresIn: ["us", "india", "apac"], tags: ["database", "data"] },
+  { name: "Cribl", ats: "greenhouse", token: "cribl", hiresIn: ["us", "apac", "eu", "india", "uk"], tags: ["observability"] },
 
   // AI
   { name: "Anthropic", ats: "greenhouse", token: "anthropic", hiresIn: ["india", "us", "uk", "eu", "canada"], tags: ["ai"] },
