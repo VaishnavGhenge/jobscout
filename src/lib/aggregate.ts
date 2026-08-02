@@ -3,6 +3,7 @@ import { requireDb } from "@/db/client";
 import { jobs, type NewJob } from "@/db/schema";
 import { companies, type Company } from "./companies";
 import { isEngineeringRole, scoreJob } from "./scoring";
+import { profile } from "./profile";
 import { fetchAdzuna, adzunaConfigured, type AdzunaQuery } from "./aggregators/adzuna";
 
 /**
@@ -37,11 +38,19 @@ export interface AggregateResult {
   fetched: number;
   /** Dropped because a curated board already carries the same role. */
   duplicates: number;
+  /** Dropped because the "employer" is a reposting platform. */
+  reposts: number;
   kept: number;
   eligible: number;
   fresh: number;
   durationMs: number;
   error?: string;
+}
+
+/** True when the company name is a platform relisting someone else's role. */
+function isReposter(company: string): boolean {
+  const c = company.toLowerCase();
+  return profile.repostBlocklist.some((name) => c.includes(name));
 }
 
 /**
@@ -89,7 +98,7 @@ function dedupeKey(company: string, title: string): string {
 export async function refreshAggregator(): Promise<AggregateResult> {
   const db = requireDb();
   const startedAt = Date.now();
-  const base = { source: AGGREGATOR_SOURCE, fetched: 0, duplicates: 0, kept: 0, eligible: 0, fresh: 0 };
+  const base = { source: AGGREGATOR_SOURCE, fetched: 0, duplicates: 0, reposts: 0, kept: 0, eligible: 0, fresh: 0 };
 
   if (!adzunaConfigured()) {
     return {
@@ -123,6 +132,7 @@ export async function refreshAggregator(): Promise<AggregateResult> {
   const rows: NewJob[] = [];
   let fetched = 0;
   let duplicates = 0;
+  let reposts = 0;
 
   for (const q of QUERIES) {
     const results = await fetchAdzuna(q);
@@ -132,6 +142,10 @@ export async function refreshAggregator(): Promise<AggregateResult> {
       if (seen.has(posting.externalId)) continue;
       seen.add(posting.externalId);
       if (!isEngineeringRole(posting.title)) continue;
+      if (isReposter(company)) {
+        reposts++;
+        continue;
+      }
 
       const key = dedupeKey(company, posting.title);
       if (seenElsewhere.has(key)) {
@@ -176,6 +190,7 @@ export async function refreshAggregator(): Promise<AggregateResult> {
     source: AGGREGATOR_SOURCE,
     fetched,
     duplicates,
+    reposts,
     kept: rows.length,
     eligible: rows.filter((r) => r.eligibility === "eligible").length,
     fresh: rows.filter((r) => !firstSeen.has(r.externalId)).length,

@@ -155,6 +155,28 @@ export const profile = {
   ],
 
   /**
+   * Platforms that relist other companies' postings under their own name.
+   * Applied to aggregator rows only — the ATS boards are curated, so a name
+   * here would never match one.
+   *
+   * Kept deliberately short. The test for entry is "does this name hide the
+   * actual employer", not "is this a company I'd rather not work for" — a
+   * staffing firm that hires onto its own payroll is a real employer and a real
+   * application, however unglamorous. ALIQAN, Trigent and Millenium Infotech
+   * are Indian services firms and are left in for that reason; add them here if
+   * you decide you don't want body-shop roles, but that's a preference, not a
+   * data-quality fix.
+   *
+   * Matched case-insensitively against the whole company name.
+   */
+  repostBlocklist: [
+    /** Aggregator that republishes remote roles; the real employer is hidden. */
+    "jobgether",
+    /** Recruiting marketplace posting on behalf of unnamed clients. */
+    "weekday ai",
+  ],
+
+  /**
    * Freshness tiers, applied to the posting date. A req open for months is
    * usually filled, frozen, or buried under a thousand applicants — applying on
    * day 2 beats a perfect title match on day 80.
