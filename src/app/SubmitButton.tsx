@@ -10,14 +10,22 @@ export function SubmitButton({
   children,
   pendingText,
   className = "btn",
+  title,
 }: {
   children: React.ReactNode;
   pendingText?: string;
   className?: string;
+  title?: string;
 }) {
   const { pending } = useFormStatus();
   return (
-    <button className={className} type="submit" disabled={pending} aria-busy={pending}>
+    <button
+      className={className}
+      type="submit"
+      disabled={pending}
+      aria-busy={pending}
+      title={title}
+    >
       {pending && <span className="spinner" aria-hidden="true" />}
       {pending ? (pendingText ?? children) : children}
     </button>

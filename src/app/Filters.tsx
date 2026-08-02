@@ -15,6 +15,10 @@ export interface FilterState {
   maxAge: string;
   /** "hide" drops roles already in the tracker; "" shows everything. */
   tracked: string;
+  /** Max years of experience asked for; "" for any. */
+  maxYoe: string;
+  /** "show" surfaces dismissed roles instead of hiding them. */
+  dismissed: string;
 }
 
 /** Defaults, kept here so "is a filter active?" and Clear agree on what's normal. */
@@ -43,6 +47,9 @@ export function Filters(initial: FilterState) {
       if (!v) sp.delete(k);
       else sp.set(k, v);
     }
+    // Any filter change invalidates the current page. Staying on page 6 while
+    // narrowing 900 results to 40 lands the reader on an empty screen.
+    sp.delete("page");
     startTransition(() =>
       router.replace(`${pathname}?${sp.toString()}`, { scroll: false }),
     );
@@ -62,6 +69,8 @@ export function Filters(initial: FilterState) {
     Boolean(initial.q) ||
     Boolean(initial.source) ||
     Boolean(initial.maxAge) ||
+    Boolean(initial.maxYoe) ||
+    initial.dismissed === "show" ||
     initial.remote === "1" ||
     initial.tracked === "hide" ||
     initial.minScore !== FILTER_DEFAULTS.minScore ||
@@ -117,6 +126,7 @@ export function Filters(initial: FilterState) {
         title="Older reqs are usually filled, frozen, or buried"
       >
         <option value="">Any age</option>
+        <option value="3">Posted ≤ 3d</option>
         <option value="7">Posted ≤ 7d</option>
         <option value="14">Posted ≤ 14d</option>
         <option value="30">Posted ≤ 30d</option>
@@ -132,6 +142,18 @@ export function Filters(initial: FilterState) {
         <option value="lever">Lever</option>
         <option value="smartrecruiters">SmartRecruiters</option>
         <option value="rippling">Rippling</option>
+        <option value="adzuna">Adzuna (aggregated)</option>
+      </select>
+      <select
+        value={initial.maxYoe}
+        onChange={(e) => apply({ maxYoe: e.target.value })}
+        aria-label="Maximum experience asked for"
+        title="Postings that don't state a requirement are always kept"
+      >
+        <option value="">Any experience</option>
+        <option value="2">Asks ≤ 2 yrs</option>
+        <option value="3">Asks ≤ 3 yrs</option>
+        <option value="5">Asks ≤ 5 yrs</option>
       </select>
       <select
         value={initial.minScore}
@@ -167,6 +189,14 @@ export function Filters(initial: FilterState) {
           onChange={(e) => apply({ tracked: e.target.checked ? "hide" : "" })}
         />
         Untracked only
+      </label>
+      <label className="check" title="Show roles you've ruled out">
+        <input
+          type="checkbox"
+          checked={initial.dismissed === "show"}
+          onChange={(e) => apply({ dismissed: e.target.checked ? "show" : "" })}
+        />
+        Show dismissed
       </label>
       {isPending && <span className="spinner dim" aria-hidden="true" />}
       {isActive && (

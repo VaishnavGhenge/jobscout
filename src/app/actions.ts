@@ -2,10 +2,11 @@
 
 import { revalidatePath } from "next/cache";
 import { after } from "next/server";
-import { eq, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { requireDb } from "@/db/client";
 import {
   applications,
+  dismissals,
   type ApplicationStatus,
   type EligibilityLevel,
 } from "@/db/schema";
@@ -171,6 +172,46 @@ export async function removeApplication(formData: FormData): Promise<void> {
   const id = Number(formData.get("id"));
   await db.delete(applications).where(eq(applications.id, id));
   revalidateAll();
+}
+
+/**
+ * Rule a role out so the board stops showing it. Idempotent on
+ * (source, externalId), like tracking, so a double-click is harmless.
+ *
+ * Deliberately not a delete of the job row: the next refresh would re-insert it
+ * and the dismissal would silently undo itself.
+ */
+export async function dismissJob(formData: FormData): Promise<void> {
+  const db = requireDb();
+  const str = (k: string) => String(formData.get(k) ?? "");
+
+  await db
+    .insert(dismissals)
+    .values({
+      source: str("source"),
+      externalId: str("externalId"),
+      company: str("company"),
+      title: str("title"),
+    })
+    .onConflictDoNothing({
+      target: [dismissals.source, dismissals.externalId],
+    });
+
+  revalidatePath("/");
+}
+
+/** Put a dismissed role back on the board. */
+export async function restoreJob(formData: FormData): Promise<void> {
+  const db = requireDb();
+  await db
+    .delete(dismissals)
+    .where(
+      and(
+        eq(dismissals.source, String(formData.get("source") ?? "")),
+        eq(dismissals.externalId, String(formData.get("externalId") ?? "")),
+      ),
+    );
+  revalidatePath("/");
 }
 
 /**

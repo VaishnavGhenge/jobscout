@@ -630,6 +630,35 @@ label.check input {
   font-weight: 500;
   font-variant-numeric: tabular-nums;
 }
+/* Pager. Deliberately plain <a>s, not a client component: page changes are
+   whole-list navigations, so there's nothing for client state to preserve. */
+.pager {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  margin: 26px 0 8px;
+}
+.pager-mid {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+}
+.btn.disabled {
+  opacity: 0.32;
+  pointer-events: none;
+}
+/* Dismiss reads as the quieter of the two actions — tracking is the one you
+   want to be easy to hit. */
+.btn.dismiss {
+  color: var(--faint);
+}
+.btn.dismiss:hover {
+  color: var(--clay);
+  border-color: rgba(234, 106, 95, 0.4);
+}
+
 /* Experience ask. Same weight as pay: a stated fact, not a verdict — the
    posting's number is often negotiable and the badge shouldn't imply otherwise. */
 .badge.yoe {

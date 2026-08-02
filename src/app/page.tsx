@@ -5,18 +5,20 @@ import {
   gte,
   ilike,
   inArray,
+  isNull,
+  lte,
   notExists,
   or,
   sql,
   type SQL,
 } from "drizzle-orm";
 import { db } from "@/db/client";
-import { jobs, applications } from "@/db/schema";
+import { jobs, applications, dismissals } from "@/db/schema";
 import { companies } from "@/lib/companies";
 import { ageLabel, daysSince, timeAgo } from "@/lib/time";
 import { formatYoe } from "@/lib/yoe";
 import { queueSnapshot } from "@/lib/queue";
-import { refreshNow, trackJob } from "./actions";
+import { dismissJob, refreshNow, restoreJob, trackJob } from "./actions";
 import { SubmitButton } from "./SubmitButton";
 import { Filters, FILTER_DEFAULTS } from "./Filters";
 import { RunStatus } from "./RunStatus";
@@ -33,6 +35,12 @@ type Search = {
   maxAge?: string;
   /** "hide" drops roles already in the tracker. */
   tracked?: string;
+  /** Max years of experience the posting asks for; "" for any. */
+  maxYoe?: string;
+  /** "show" surfaces roles you've dismissed instead of hiding them. */
+  dismissed?: string;
+  /** 1-based page number. */
+  page?: string;
 };
 
 function scoreClass(s: number) {
@@ -40,6 +48,23 @@ function scoreClass(s: number) {
 }
 
 const daysAgo = (n: number) => new Date(Date.now() - n * 86_400_000);
+
+/**
+ * Rows per page. The board runs to four figures now, and the old flat cap of 250
+ * silently hid the tail — a filtered count that says "250+ (capped)" can't tell
+ * you whether you've seen everything.
+ */
+const PAGE_SIZE = 50;
+
+/** Rebuild the current query string with `next` applied. */
+function pageHref(sp: Search, next: Partial<Search>): string {
+  const params = new URLSearchParams();
+  for (const [k, v] of Object.entries({ ...sp, ...next })) {
+    if (v) params.set(k, String(v));
+  }
+  const qs = params.toString();
+  return qs ? `/?${qs}` : "/";
+}
 
 /** Derived so adding a connector updates the masthead on its own. */
 const boards = [...new Set(companies.map((c) => c.ats))];
@@ -94,6 +119,32 @@ export default async function BoardPage({
     filters.push(gte(jobs.postedAt, daysAgo(maxAge)));
   }
 
+  // Experience ceiling. Rows with no stated requirement are kept, not dropped —
+  // two thirds of aggregator postings say nothing, and treating silence as
+  // "asks for too much" would hide most of the board.
+  const maxYoe = Number(sp.maxYoe);
+  if (sp.maxYoe && !isNaN(maxYoe)) {
+    filters.push(or(isNull(jobs.yoeMin), lte(jobs.yoeMin, maxYoe))!);
+  }
+
+  // Dismissed roles are hidden by default. Same notExists shape as the tracker
+  // filter, and for the same reason: doing it in SQL keeps the count honest.
+  if (sp.dismissed !== "show") {
+    filters.push(
+      notExists(
+        db
+          .select({ one: sql`1` })
+          .from(dismissals)
+          .where(
+            and(
+              eq(dismissals.source, jobs.source),
+              eq(dismissals.externalId, jobs.externalId),
+            ),
+          ),
+      ),
+    );
+  }
+
   const order =
     sort === "recent"
       ? [desc(jobs.postedAt), desc(jobs.score)]
@@ -101,11 +152,28 @@ export default async function BoardPage({
         ? [desc(jobs.firstSeenAt), desc(jobs.score)]
         : [desc(jobs.score), desc(jobs.postedAt)];
 
-  const [rows, tracked, [stats], queue] = await Promise.all([
-    db.select().from(jobs).where(and(...filters)).orderBy(...order).limit(250),
+  const page = Math.max(1, Number(sp.page) || 1);
+
+  const [rows, [matched], tracked, dismissedRows, [stats], queue] = await Promise.all([
+    db
+      .select()
+      .from(jobs)
+      .where(and(...filters))
+      .orderBy(...order)
+      .limit(PAGE_SIZE)
+      .offset((page - 1) * PAGE_SIZE),
+    // Counted with the same predicates as the page query, so "X matching roles"
+    // means the filtered total rather than the size of this slice.
+    db
+      .select({ n: sql<number>`count(*)::int` })
+      .from(jobs)
+      .where(and(...filters)),
     db
       .select({ source: applications.source, externalId: applications.externalId })
       .from(applications),
+    db
+      .select({ source: dismissals.source, externalId: dismissals.externalId })
+      .from(dismissals),
     db
       .select({
         total: sql<number>`count(*)::int`,
@@ -122,6 +190,12 @@ export default async function BoardPage({
   const trackedSet = new Set(
     tracked.map((a) => `${a.source}:${a.externalId}`),
   );
+  const dismissedSet = new Set(
+    dismissedRows.map((d) => `${d.source}:${d.externalId}`),
+  );
+
+  const total = matched?.n ?? 0;
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
   return (
     <>
@@ -190,24 +264,42 @@ export default async function BoardPage({
         elig={elig}
         maxAge={sp.maxAge ?? ""}
         tracked={sp.tracked ?? ""}
+        maxYoe={sp.maxYoe ?? ""}
+        dismissed={sp.dismissed ?? ""}
       />
 
       <p className="count">
-        Showing {rows.length}
-        {rows.length === 250 ? "+ (capped)" : ""} matching role
-        {rows.length === 1 ? "" : "s"}
+        {total === 0
+          ? "No matching roles"
+          : `${total} matching role${total === 1 ? "" : "s"}`}
+        {totalPages > 1 && (
+          <span className="dim">
+            {" "}
+            · page {page} of {totalPages}
+          </span>
+        )}
+        {sp.dismissed === "show" && <span className="dim"> · showing dismissed</span>}
       </p>
 
       {rows.length === 0 ? (
         <div className="empty">
-          {stats?.total
-            ? "No roles match these filters. Try widening the age or score."
-            : "No jobs yet. Hit Refresh now to pull live postings (first run takes a few seconds)."}
+          {!stats?.total ? (
+            "No jobs yet. Hit Refresh now to pull live postings (first run takes a few seconds)."
+          ) : page > totalPages ? (
+            <>
+              Page {page} is past the end of {total} result
+              {total === 1 ? "" : "s"}.{" "}
+              <a href={pageHref(sp, { page: "" })}>Back to the first page</a>
+            </>
+          ) : (
+            "No roles match these filters. Try widening the age or score."
+          )}
         </div>
       ) : (
         <div className="jobs">
           {rows.map((j, i) => {
             const isTracked = trackedSet.has(`${j.source}:${j.externalId}`);
+            const isDismissed = dismissedSet.has(`${j.source}:${j.externalId}`);
             const isNew = (daysSince(j.firstSeenAt) ?? 99) < 1;
             return (
               <div
@@ -278,7 +370,15 @@ export default async function BoardPage({
                   </div>
                 </div>
                 <div className="job-actions">
-                  {isTracked ? (
+                  {isDismissed ? (
+                    <form action={restoreJob}>
+                      <input type="hidden" name="source" value={j.source} />
+                      <input type="hidden" name="externalId" value={j.externalId} />
+                      <SubmitButton className="btn ghost small" pendingText="…">
+                        ↩ Restore
+                      </SubmitButton>
+                    </form>
+                  ) : isTracked ? (
                     <span className="tracked">✓ Tracked</span>
                   ) : (
                     <form action={trackJob}>
@@ -301,11 +401,59 @@ export default async function BoardPage({
                       </SubmitButton>
                     </form>
                   )}
+                  {!isDismissed && !isTracked && (
+                    <form action={dismissJob}>
+                      <input type="hidden" name="source" value={j.source} />
+                      <input type="hidden" name="externalId" value={j.externalId} />
+                      <input type="hidden" name="company" value={j.company} />
+                      <input type="hidden" name="title" value={j.title} />
+                      <SubmitButton
+                        className="btn ghost small dismiss"
+                        pendingText="…"
+                        title="Rule this out — it won't come back on the next refresh"
+                      >
+                        ✕ Not for me
+                      </SubmitButton>
+                    </form>
+                  )}
                 </div>
               </div>
             );
           })}
         </div>
+      )}
+
+      {totalPages > 1 && (
+        <nav className="pager" aria-label="Pagination">
+          {page > 1 ? (
+            <a
+              className="btn ghost small"
+              href={pageHref(sp, { page: page === 2 ? "" : String(page - 1) })}
+            >
+              ← Previous
+            </a>
+          ) : (
+            <span className="btn ghost small disabled" aria-disabled="true">
+              ← Previous
+            </span>
+          )}
+          <span className="pager-mid">
+            {(page - 1) * PAGE_SIZE + 1}–{Math.min(page * PAGE_SIZE, total)} of{" "}
+            {total}
+          </span>
+          {page < totalPages ? (
+            <a
+              className="btn ghost small"
+              href={pageHref(sp, { page: String(page + 1) })}
+            >
+              Next →
+            </a>
+          ) : (
+            <span className="btn ghost small disabled" aria-disabled="true">
+              Next →
+            </span>
+          )}
+        </nav>
       )}
     </>
   );

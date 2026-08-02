@@ -136,6 +136,34 @@ export const applications = pgTable(
   ],
 );
 
+/**
+ * Roles you've looked at and ruled out.
+ *
+ * Separate from `applications` on purpose: a dismissal is the absence of intent,
+ * and folding it in as another status would corrupt every funnel number in
+ * insights.ts — a rejected application and a role you never wanted are not the
+ * same event.
+ *
+ * Keyed on (source, externalId) like the tracker, so a dismissal survives the
+ * job row being deleted and re-inserted on the next refresh. Without that, every
+ * role you dismissed would come straight back a few hours later.
+ */
+export const dismissals = pgTable(
+  "dismissals",
+  {
+    id: serial("id").primaryKey(),
+    source: text("source").notNull(),
+    externalId: text("external_id").notNull(),
+    /** Snapshot for the "dismissed" view — the job row may be gone. */
+    company: text("company").notNull().default(""),
+    title: text("title").notNull().default(""),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [uniqueIndex("dismissals_source_external_idx").on(t.source, t.externalId)],
+);
+
 export const taskState = pgEnum("task_state", [
   "queued",
   "running",
@@ -196,6 +224,7 @@ export type Job = typeof jobs.$inferSelect;
 export type NewJob = typeof jobs.$inferInsert;
 export type Application = typeof applications.$inferSelect;
 export type ApplicationStatus = (typeof applicationStatus.enumValues)[number];
+export type Dismissal = typeof dismissals.$inferSelect;
 export type RefreshTask = typeof refreshTasks.$inferSelect;
 export type TaskState = (typeof taskState.enumValues)[number];
 export type EligibilityLevel = (typeof eligibilityLevel.enumValues)[number];
