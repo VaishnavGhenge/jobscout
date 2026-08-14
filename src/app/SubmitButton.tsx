@@ -11,11 +11,14 @@ export function SubmitButton({
   pendingText,
   className = "btn",
   title,
+  confirm,
 }: {
   children: React.ReactNode;
   pendingText?: string;
   className?: string;
   title?: string;
+  /** Ask this before submitting. For actions with no undo — deletes. */
+  confirm?: string;
 }) {
   const { pending } = useFormStatus();
   return (
@@ -25,6 +28,9 @@ export function SubmitButton({
       disabled={pending}
       aria-busy={pending}
       title={title}
+      onClick={(e) => {
+        if (confirm && !window.confirm(confirm)) e.preventDefault();
+      }}
     >
       {pending && <span className="spinner" aria-hidden="true" />}
       {pending ? (pendingText ?? children) : children}

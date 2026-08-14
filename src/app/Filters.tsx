@@ -2,6 +2,8 @@
 
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import { useEffect, useRef, useState, useTransition } from "react";
+import { FILTER_DEFAULTS } from "@/lib/filter-defaults";
+import { SearchBox } from "./SearchBox";
 
 export interface FilterState {
   q: string;
@@ -21,13 +23,6 @@ export interface FilterState {
   dismissed: string;
 }
 
-/** Defaults, kept here so "is a filter active?" and Clear agree on what's normal. */
-export const FILTER_DEFAULTS = {
-  minScore: "45",
-  elig: "open",
-  sort: "score",
-} as const;
-
 /**
  * Auto-applying filter bar. Selects/checkbox apply instantly; the search box is
  * debounced. Uses router.replace (RSC navigation, no full reload) inside a
@@ -40,6 +35,7 @@ export function Filters(initial: FilterState) {
   const [isPending, startTransition] = useTransition();
   const [text, setText] = useState(initial.q);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const input = useRef<HTMLInputElement>(null);
 
   function apply(next: Partial<FilterState>) {
     const sp = new URLSearchParams(params.toString());
@@ -61,6 +57,13 @@ export function Filters(initial: FilterState) {
     timer.current = setTimeout(() => apply({ q: v }), 350);
   }
 
+  // Follow the URL when something other than typing changes it — Back, Forward,
+  // a link that sets `q`. Skipped while the box has focus: a slow round trip
+  // would otherwise reel the box back to a stale value mid-word.
+  useEffect(() => {
+    if (document.activeElement !== input.current) setText(initial.q);
+  }, [initial.q]);
+
   useEffect(() => () => {
     if (timer.current) clearTimeout(timer.current);
   }, []);
@@ -78,37 +81,25 @@ export function Filters(initial: FilterState) {
     (initial.sort !== "" && initial.sort !== FILTER_DEFAULTS.sort);
 
   function clear() {
+    if (timer.current) clearTimeout(timer.current);
     setText("");
     startTransition(() => router.replace(pathname, { scroll: false }));
   }
 
   return (
     <div className={`filters${isPending ? " updating" : ""}`} aria-busy={isPending}>
-      <div className="search">
-        <svg width="13" height="13" viewBox="0 0 14 14" aria-hidden="true">
-          <circle
-            cx="6"
-            cy="6"
-            r="4.4"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1.4"
-          />
-          <path
-            d="M9.4 9.4 12.6 12.6"
-            stroke="currentColor"
-            strokeWidth="1.4"
-            strokeLinecap="round"
-          />
-        </svg>
-        <input
-          type="text"
-          placeholder="Search title or company…"
-          aria-label="Search title or company"
-          value={text}
-          onChange={(e) => onSearch(e.target.value)}
-        />
-      </div>
+      <SearchBox
+        value={text}
+        onChange={onSearch}
+        onEscape={() => {
+          if (timer.current) clearTimeout(timer.current);
+          setText("");
+          apply({ q: "" });
+        }}
+        placeholder="Search title or company…"
+        label="Search title or company"
+        inputRef={input}
+      />
       <select
         value={initial.elig}
         onChange={(e) => apply({ elig: e.target.value })}

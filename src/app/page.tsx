@@ -18,9 +18,10 @@ import { companies } from "@/lib/companies";
 import { ageLabel, daysSince, timeAgo } from "@/lib/time";
 import { formatYoe } from "@/lib/yoe";
 import { queueSnapshot } from "@/lib/queue";
+import { FILTER_DEFAULTS } from "@/lib/filter-defaults";
 import { dismissJob, refreshNow, restoreJob, trackJob } from "./actions";
 import { SubmitButton } from "./SubmitButton";
-import { Filters, FILTER_DEFAULTS } from "./Filters";
+import { Filters } from "./Filters";
 import { RunStatus } from "./RunStatus";
 
 export const dynamic = "force-dynamic";

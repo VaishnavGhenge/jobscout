@@ -47,6 +47,7 @@ export function ApplicationDialog({
   // A scraped row's (source, externalId) is the key the board dedupes against,
   // so only hand-added rows may change source.
   const sourceEditable = !app || isManualSource(app.source);
+  const hadResponse = Boolean(app?.firstResponseAt);
 
   return (
     <>
@@ -160,9 +161,27 @@ export function ApplicationDialog({
                 type="date"
                 defaultValue={dateValue(app?.appliedAt ?? null)}
               />
-              <em>Blank = today</em>
+              <em>Blank = today, if applied</em>
             </label>
 
+            {/* The whole reason this field exists: replies arrive on days you
+                don't open the tracker, and "days to reply" is only worth
+                measuring if it's the day they actually wrote. */}
+            <label className="field">
+              <span>They replied on</span>
+              <input
+                name="firstResponseAt"
+                type="date"
+                defaultValue={dateValue(app?.firstResponseAt ?? null)}
+              />
+              <em>{hadResponse ? "Clear = no reply after all" : "Blank = no reply yet"}</em>
+            </label>
+          </div>
+
+          {/* Tells the action that an empty date means "clear it", not "leave it". */}
+          <input type="hidden" name="hadResponse" value={hadResponse ? "1" : ""} />
+
+          <div className="modal-grid">
             <label className="field">
               <span>Eligibility</span>
               <select
@@ -176,17 +195,17 @@ export function ApplicationDialog({
                 ))}
               </select>
             </label>
-          </div>
 
-          <label className="field">
-            <span>Location</span>
-            <input
-              name="location"
-              autoComplete="off"
-              placeholder="Bengaluru · Remote"
-              defaultValue={app?.location ?? ""}
-            />
-          </label>
+            <label className="field">
+              <span>Location</span>
+              <input
+                name="location"
+                autoComplete="off"
+                placeholder="Bengaluru · Remote"
+                defaultValue={app?.location ?? ""}
+              />
+            </label>
+          </div>
 
           <label className="check">
             <input

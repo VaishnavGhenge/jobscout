@@ -86,6 +86,18 @@ export async function saveApplication(formData: FormData): Promise<void> {
       ? new Date()
       : null;
 
+  // A reply date you typed wins over anything inferred from the status. Emptying
+  // a field that had one means "that reply never happened"; leaving a field that
+  // was never set empty falls through to the status rule below. Without this,
+  // `firstResponseAt` could only ever be "the day I got round to opening the
+  // tracker", which makes time-to-reply unmeasurable.
+  const repliedOn = str("firstResponseAt");
+  const reply: Date | null | undefined = repliedOn
+    ? new Date(`${repliedOn}T00:00:00Z`)
+    : str("hadResponse") === "1"
+      ? null
+      : undefined;
+
   const fields = {
     company,
     title,
@@ -107,11 +119,13 @@ export async function saveApplication(formData: FormData): Promise<void> {
         // (source, externalId) alone is what keeps the board still showing it
         // as tracked.
         ...(source ? { source } : {}),
-        ...(IMPLIES_RESPONSE.includes(status)
-          ? {
-              firstResponseAt: sql`coalesce(${applications.firstResponseAt}, now())`,
-            }
-          : {}),
+        ...(reply !== undefined
+          ? { firstResponseAt: reply }
+          : IMPLIES_RESPONSE.includes(status)
+            ? {
+                firstResponseAt: sql`coalesce(${applications.firstResponseAt}, now())`,
+              }
+            : {}),
         updatedAt: sql`now()`,
       })
       .where(eq(applications.id, id));
@@ -120,7 +134,8 @@ export async function saveApplication(formData: FormData): Promise<void> {
       ...fields,
       source: source || "other",
       externalId: crypto.randomUUID(),
-      firstResponseAt: IMPLIES_RESPONSE.includes(status) ? new Date() : null,
+      firstResponseAt:
+        reply ?? (IMPLIES_RESPONSE.includes(status) ? new Date() : null),
     });
   }
 

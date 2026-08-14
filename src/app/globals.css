@@ -223,7 +223,8 @@ h1 {
   background: linear-gradient(180deg, var(--panel), rgba(16, 16, 20, 0.45));
   overflow: hidden;
 }
-.stats > span {
+.stats > span,
+.stats > a {
   display: flex;
   flex-direction: column;
   gap: 1px;
@@ -237,8 +238,20 @@ h1 {
   text-transform: uppercase;
   white-space: nowrap;
 }
-.stats > span:last-child {
+.stats > :last-child {
   border-right: none;
+}
+/* A stat that's also a filter for the list underneath it. */
+.stats > a {
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+.stats > a:hover {
+  background: rgba(242, 239, 233, 0.045);
+}
+.stats > a[data-on="1"] {
+  background: rgba(242, 239, 233, 0.07);
+  box-shadow: inset 0 -2px 0 var(--paper);
 }
 .stats b {
   font-family: var(--font-display);
@@ -377,6 +390,23 @@ h1 {
 .filters input[type="text"] {
   width: 100%;
   padding-left: 32px;
+  padding-right: 30px;
+}
+
+/* The "/" hint. Hidden as soon as there's a query, so it never sits under text. */
+.search .slash {
+  position: absolute;
+  right: 9px;
+  top: 50%;
+  transform: translateY(-50%);
+  pointer-events: none;
+  padding: 3px 5px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--faint);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1;
 }
 
 .filters input,
@@ -461,6 +491,10 @@ label.check input {
   letter-spacing: 0.13em;
   text-transform: uppercase;
   margin: 14px 2px 12px;
+}
+/* Secondary clause on an already-quiet line. */
+.count .dim {
+  opacity: 0.65;
 }
 
 /* ── Job rows ───────────────────────────────────────────────────────── */
@@ -908,6 +942,14 @@ label.check input {
   flex-direction: column;
   gap: 2px;
 }
+/* Stats that lead somewhere — the tracker, already filtered to that number. */
+.fstat.linked {
+  transition: border-color 0.15s ease, transform 0.15s ease;
+}
+.fstat.linked:hover {
+  border-color: var(--line);
+  transform: translateY(-1px);
+}
 .fstat b {
   font-family: var(--font-display);
   font-weight: 400;
@@ -1314,7 +1356,8 @@ code {
   .board {
     grid-template-columns: 1fr;
   }
-  .stats > span {
+  .stats > span,
+  .stats > a {
     flex: 1 0 45%;
     border-bottom: 1px solid var(--line-soft);
   }

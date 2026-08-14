@@ -6,6 +6,7 @@ export default function Loading() {
       <p className="subtitle">
         Your pipeline, and how long each side has been waiting on the other.
       </p>
+      <div className="filters skeleton" aria-hidden="true" style={{ height: 58 }} />
       <div className="board" aria-hidden="true">
         {Array.from({ length: 5 }).map((_, i) => (
           <div className="col" key={i}>

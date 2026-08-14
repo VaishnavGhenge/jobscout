@@ -14,15 +14,19 @@ export const STATUS_OPTIONS: { key: ApplicationStatus; label: string }[] = [
 export function StatusSelect({
   id,
   status,
+  label,
 }: {
   id: number;
   status: ApplicationStatus;
+  /** Every card renders one of these, so the select needs to say whose it is. */
+  label: string;
 }) {
   return (
     <form action={setStatus}>
       <input type="hidden" name="id" value={id} />
       <select
         name="status"
+        aria-label={label}
         defaultValue={status}
         onChange={(e) => e.currentTarget.form?.requestSubmit()}
       >

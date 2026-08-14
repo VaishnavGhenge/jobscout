@@ -1,3 +1,4 @@
+import type { Metadata } from "next";
 import Link from "next/link";
 import { db } from "@/db/client";
 import { applications, type Application } from "@/db/schema";
@@ -11,6 +12,8 @@ import {
 } from "@/lib/insights";
 
 export const dynamic = "force-dynamic";
+
+export const metadata: Metadata = { title: "Insights" };
 
 /** Below this many applications, a reply rate is noise, not a signal. */
 const MIN_SAMPLE = 5;
@@ -79,22 +82,43 @@ export default async function InsightsPage() {
 
   return (
     <>
-      <p className="micro">{funnel.applied} applications measured</p>
-      <h1>Insights</h1>
-      <p className="subtitle">
-        Which kinds of applications get answered — and which quietly don&apos;t.
-      </p>
+      <div className="rowbar">
+        <div>
+          <p className="micro">{funnel.applied} applications measured</p>
+          <h1>Insights</h1>
+          <p className="subtitle" style={{ margin: 0 }}>
+            Which kinds of applications get answered — and which quietly
+            don&apos;t.
+          </p>
+        </div>
+        <Link className="btn ghost" href="/tracker">
+          ← Tracker
+        </Link>
+      </div>
 
+      {/* The three counts you can act on link into the tracker already filtered:
+          a number you can't do anything with is just decoration. */}
       <div className="funnel">
         <Stat n={funnel.applied} label="applied" />
-        <Stat n={funnel.replied} label="got a reply" tone="good" />
+        <Stat
+          n={funnel.replied}
+          label="got a reply"
+          tone="good"
+          href="/tracker?reply=replied"
+        />
         <Stat n={funnel.interviewing} label="interviewing" tone="good" />
         <Stat n={funnel.offers} label="offers" tone="good" />
-        <Stat n={funnel.waiting} label="still waiting" tone="warn" />
+        <Stat
+          n={funnel.waiting}
+          label="still waiting"
+          tone="warn"
+          href="/tracker?reply=waiting"
+        />
         <Stat
           n={funnel.ghosted}
           label={`silent ${GHOST_AFTER_DAYS}d+`}
           tone="bad"
+          href="/tracker?reply=ghosted"
         />
       </div>
 
@@ -162,15 +186,24 @@ function Stat({
   n,
   label,
   tone,
+  href,
 }: {
   n: number;
   label: string;
   tone?: "good" | "warn" | "bad";
+  /** Where this number lives in the tracker, when there's somewhere to go. */
+  href?: string;
 }) {
-  return (
-    <div className="fstat">
+  const body = (
+    <>
       <b className={tone ?? ""}>{n}</b>
       <span>{label}</span>
-    </div>
+    </>
+  );
+  if (!href || n === 0) return <div className="fstat">{body}</div>;
+  return (
+    <Link className="fstat linked" href={href}>
+      {body}
+    </Link>
   );
 }
