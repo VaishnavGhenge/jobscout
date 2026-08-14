@@ -30,6 +30,15 @@ export function isWaiting(a: Application): boolean {
   return d !== null && d < GHOST_AFTER_DAYS;
 }
 
+/** Days from sending the application to the first reply of any kind. */
+export function daysToReply(a: Application): number | null {
+  if (!a.appliedAt || !a.firstResponseAt) return null;
+  const from = new Date(a.appliedAt).getTime();
+  const to = new Date(a.firstResponseAt).getTime();
+  if (Number.isNaN(from) || Number.isNaN(to)) return null;
+  return Math.max(0, Math.round((to - from) / 86_400_000));
+}
+
 /** How old the posting was on the day you applied to it. */
 export function ageAtApplication(a: Application): number | null {
   if (!a.postedAt || !a.appliedAt) return null;
@@ -67,11 +76,8 @@ export function buildFunnel(apps: Application[]): Funnel {
   const replied = applied.filter(hasReplied);
 
   const gaps = replied
-    .map((a) => {
-      const from = new Date(a.appliedAt!).getTime();
-      const to = new Date(a.firstResponseAt!).getTime();
-      return Math.max(0, Math.round((to - from) / 86_400_000));
-    })
+    .map(daysToReply)
+    .filter((d): d is number => d !== null)
     .sort((x, y) => x - y);
 
   return {

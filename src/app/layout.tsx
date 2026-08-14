@@ -26,7 +26,8 @@ const mono = IBM_Plex_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "JobScout",
+  // Templated so a pinned tab says which page it is, not three identical ones.
+  title: { default: "JobScout", template: "%s · JobScout" },
   description: "Live job aggregator + application tracker for your search.",
 };
 
