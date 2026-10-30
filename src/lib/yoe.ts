@@ -1,16 +1,26 @@
 /**
- * Pull the years-of-experience requirement out of a job description.
+ * Pull the years-of-experience requirement out of a posting.
  *
- * Like comp.ts, this is display-only and deliberately not part of scoring. The
- * number a JD prints is a wish, not a gate — plenty of "5+ years" reqs hire at
- * three — so ranking on it would bury roles that are worth an application.
- * Showing it lets you make that call yourself.
+ * This *is* scored now (see profile.yoeGap). It used to be display-only on the
+ * grounds that a stated number is a wish rather than a gate, which is true, and
+ * it's still not a gate: the gap above your own experience costs points on a
+ * sliding scale and nothing is dropped for it. What isn't defensible is
+ * ignoring it, which let "Software Engineering Technical Leader | Golang
+ * (12-15 Years)" score 98 for a two-year candidate.
  *
- * The parsing risk here is the opposite of comp.ts's: years are everywhere in a
- * JD. "4 year vesting with a 1 year cliff", "over the past 10 years we've
- * grown", "founded 8 years ago" all parse identically to a requirement. So a
- * match only counts when an experience word sits next to it and no vesting or
- * company-history word does.
+ * Two parsers, because the title and the body carry the number under opposite
+ * conventions:
+ *
+ * - In a description, years are everywhere. "4 year vesting with a 1 year
+ *   cliff", "over the past 10 years we've grown", "founded 8 years ago" all
+ *   parse identically to a requirement, so a match only counts when an
+ *   experience word sits next to it and no vesting or company-history word
+ *   does.
+ * - In a title there is no prose to disambiguate, and no vesting schedule
+ *   either. "_4Yrs_", "- 9 yrs -", "(12-15 Years)", "// 5.5 - 8 years //" are
+ *   the requirement, stated bluntly, and requiring a nearby "experience" would
+ *   miss every one of them. This is the Indian-market convention and the ATS
+ *   parsers never saw it, because they only ever read the body.
  */
 
 export interface Yoe {
@@ -97,6 +107,57 @@ export function parseYoe(description: string): Yoe | null {
 
       return { min, max };
     }
+  }
+
+  return null;
+}
+
+/**
+ * Numbers in a title, with decimals allowed: Indian listings write "5.5 - 8
+ * years" and truncating that to "5" understates the ask.
+ */
+const TITLE_PATTERNS: { re: RegExp; range: boolean }[] = [
+  {
+    re: new RegExp(
+      String.raw`(\d{1,2}(?:\.\d)?)${SEP}(\d{1,2}(?:\.\d)?)\s*\+?\s*${Y}`,
+      "i",
+    ),
+    range: true,
+  },
+  {
+    re: new RegExp(String.raw`(\d{1,2}(?:\.\d)?)\s*\+?\s*${Y}`, "i"),
+    range: false,
+  },
+];
+
+/**
+ * The few things "N years" can mean in a title that aren't a requirement. Much
+ * shorter than the description guard: a title has no equity section, no company
+ * history and no benefits list.
+ */
+const TITLE_NOT_EXPERIENCE_RE = /\b(contract|notice period|bond|old)\b/i;
+
+/**
+ * Read the requirement out of a *title*. Returns null when the title carries no
+ * number, which is most of them.
+ */
+export function parseYoeFromTitle(title: string): Yoe | null {
+  if (!title) return null;
+  if (TITLE_NOT_EXPERIENCE_RE.test(title)) return null;
+
+  for (const { re, range } of TITLE_PATTERNS) {
+    const m = re.exec(title);
+    if (!m) continue;
+
+    // Round down: a role asking "5.5 years" is asking for five-and-change, and
+    // the gap tiers are whole numbers.
+    const min = Math.floor(Number(m[1]));
+    const max = range ? Math.floor(Number(m[2])) : null;
+    if (!Number.isFinite(min) || min > MAX_PLAUSIBLE) continue;
+    if (max !== null && (max <= min || max > MAX_PLAUSIBLE * 2)) continue;
+    if (min === 0 && max === null) continue;
+
+    return { min, max };
   }
 
   return null;

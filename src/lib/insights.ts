@@ -131,3 +131,55 @@ export function sliceBy(
 
 export const pct = (v: number | null) =>
   v === null ? "—" : `${Math.round(v * 100)}%`;
+
+/**
+ * What your dismissals say about the ranking.
+ *
+ * This is the only supervised signal the app gets, and it points at scoring
+ * rather than at reply rates: a dismissal is you telling the board it was wrong
+ * about a role, and `reason` says which weight in profile.ts was wrong. The
+ * score at dismissal time is what makes it actionable. Ruling out something the
+ * board had already put at 30 is agreement; ruling out something it put at 95 is
+ * a bug with a location.
+ */
+export interface DismissalSlice {
+  reason: string;
+  count: number;
+  /** Mean fit score of the roles you ruled out for this reason. */
+  avgScore: number;
+  /** The worst disagreement in this group: highest-scoring role you rejected. */
+  topScore: number;
+}
+
+export function summarizeDismissals(
+  rows: { reason: string; score: number }[],
+): DismissalSlice[] {
+  const groups = new Map<string, number[]>();
+  for (const r of rows) {
+    const list = groups.get(r.reason) ?? [];
+    list.push(r.score);
+    groups.set(r.reason, list);
+  }
+
+  return [...groups.entries()]
+    .map(([reason, scores]) => ({
+      reason,
+      count: scores.length,
+      avgScore: Math.round(scores.reduce((a, b) => a + b, 0) / scores.length),
+      topScore: Math.max(...scores),
+    }))
+    // Highest disagreement first: the group whose roles were ranked best is the
+    // one whose weights are most worth editing.
+    .sort((a, b) => b.topScore - a.topScore || b.count - a.count);
+}
+
+/** The lever in profile.ts each dismissal reason points at. */
+export const DISMISS_LEVER: Record<string, string> = {
+  stack: "profile.offStackTech / techKeywords",
+  level: "profile.seniority / yoeGap",
+  domain: "profile.offStackDomains",
+  location: "profile.basedIn, lib/regions.ts",
+  pay: "lib/comp.ts (unscored by design)",
+  company: "not a scoring signal",
+  other: "unclassified",
+};

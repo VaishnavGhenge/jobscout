@@ -152,9 +152,9 @@ export function Filters(initial: FilterState) {
         aria-label="Minimum fit score"
       >
         <option value="0">Any score</option>
-        <option value="45">45+ relevant</option>
-        <option value="60">60+ good fit</option>
-        <option value="75">75+ strong</option>
+        <option value="50">50+ relevant</option>
+        <option value="62">62+ good fit</option>
+        <option value="76">76+ strong</option>
       </select>
       <select
         value={initial.sort || FILTER_DEFAULTS.sort}

@@ -40,10 +40,38 @@ export const jobs = pgTable(
     company: text("company").notNull(),
     title: text("title").notNull(),
     location: text("location").notNull().default(""),
+    /**
+     * Every location the role is open in, and the board's country code when it
+     * gives one. Stored alongside the parsed `regions` because parsing is the
+     * lossy step: keeping the inputs is what lets `profile.basedIn` change and
+     * be reassessed by a rescore rather than a full recrawl.
+     */
+    locations: jsonb("locations").$type<string[]>().notNull().default([]),
+    countryCode: text("country_code"),
     url: text("url").notNull(),
     remote: boolean("remote").notNull().default(false),
     department: text("department").notNull().default(""),
     postedAt: timestamp("posted_at", { withTimezone: true }),
+    /**
+     * Plain-text job description, as fetched.
+     *
+     * Kept rather than discarded after extraction, which is how this started.
+     * Four things were parsed out of it (blockers, pay band, experience ask,
+     * stack keywords) and then the text was dropped, so every tuning change to
+     * a parser or a keyword list needed all 84 boards refetched before you could
+     * see whether it helped, and no change could be tested against the rows
+     * already sitting here. It also makes the board searchable on JD text, which
+     * a title-only search can't be.
+     *
+     * Empty for rows written before this column existed, and for anything the
+     * source truncates: Adzuna's search API returns roughly 200 characters.
+     */
+    description: text("description").notNull().default(""),
+    /**
+     * Fit score, 0-100. Time-independent by design: freshness is applied when
+     * the board is read (lib/freshness.ts), because a stored decay term is stale
+     * the day after it's written and 553 rows were proof of it.
+     */
     score: integer("score").notNull().default(0),
     reasons: jsonb("reasons").$type<string[]>().notNull().default([]),
     eligibility: eligibilityLevel("eligibility").notNull().default("longshot"),
@@ -55,10 +83,10 @@ export const jobs = pgTable(
      */
     compLabel: text("comp_label"),
     /**
-     * Years of experience the posting asks for. Null when it doesn't say, which
-     * is roughly a third of them — "unknown", never "no requirement". Stored as
-     * numbers rather than a label so it can be filtered on later; see lib/yoe.ts
-     * for why it stays out of scoring.
+     * Years of experience the posting asks for, read from the title first and
+     * the body second. Null when neither says, which is two thirds of the
+     * aggregator rows: that means "unknown", never "no requirement", and
+     * profile.yoeUnknown prices it accordingly.
      */
     yoeMin: integer("yoe_min"),
     /** Upper bound when a range is stated ("3-5 years"), else null. */
@@ -137,6 +165,33 @@ export const applications = pgTable(
 );
 
 /**
+ * Why a role was ruled out.
+ *
+ * Every value maps onto a lever in profile.ts, which is the whole point: a
+ * dismissal is the cheapest label the system will ever get, and until now it
+ * recorded only that you'd said no, never what you were saying no to. The one
+ * dismissal on record was a C#/Angular role scoring 100, which is a finding the
+ * board could have surfaced by itself given a reason column.
+ *
+ * - `stack`    -> profile.offStackTech / techKeywords
+ * - `level`    -> profile.seniority, profile.yoeGap
+ * - `domain`   -> profile.offStackDomains
+ * - `location` -> profile.basedIn, lib/regions.ts
+ * - `pay`      -> lib/comp.ts (unscored, deliberately)
+ * - `company`  -> a judgement about the employer, not a tuning signal
+ * - `other`    -> unclassified, so a dismissal never needs a reason to happen
+ */
+export const dismissReason = pgEnum("dismiss_reason", [
+  "stack",
+  "level",
+  "domain",
+  "location",
+  "pay",
+  "company",
+  "other",
+]);
+
+/**
  * Roles you've looked at and ruled out.
  *
  * Separate from `applications` on purpose: a dismissal is the absence of intent,
@@ -157,11 +212,22 @@ export const dismissals = pgTable(
     /** Snapshot for the "dismissed" view — the job row may be gone. */
     company: text("company").notNull().default(""),
     title: text("title").notNull().default(""),
+    /** Why you ruled it out. See `dismissReason`. */
+    reason: dismissReason("reason").notNull().default("other"),
+    /**
+     * The fit score at the moment you dismissed it. A high score here is the
+     * signal worth acting on: it means the ranking disagreed with you, and the
+     * reason says which weight was wrong.
+     */
+    score: integer("score").notNull().default(0),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
   },
-  (t) => [uniqueIndex("dismissals_source_external_idx").on(t.source, t.externalId)],
+  (t) => [
+    uniqueIndex("dismissals_source_external_idx").on(t.source, t.externalId),
+    index("dismissals_reason_idx").on(t.reason),
+  ],
 );
 
 export const taskState = pgEnum("task_state", [
@@ -228,3 +294,4 @@ export type Dismissal = typeof dismissals.$inferSelect;
 export type RefreshTask = typeof refreshTasks.$inferSelect;
 export type TaskState = (typeof taskState.enumValues)[number];
 export type EligibilityLevel = (typeof eligibilityLevel.enumValues)[number];
+export type DismissReason = (typeof dismissReason.enumValues)[number];

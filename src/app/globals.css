@@ -693,6 +693,49 @@ label.check input {
   border-color: rgba(234, 106, 95, 0.4);
 }
 
+/* Dismissing asks why, so the control is a menu. Absolutely positioned rather
+   than in flow: an inline expansion would reflow every card below it and move
+   the row you were aiming at out from under the cursor. */
+.dismiss-menu {
+  position: relative;
+}
+.dismiss-menu > summary {
+  list-style: none;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+}
+.dismiss-menu > summary::-webkit-details-marker {
+  display: none;
+}
+.dismiss-menu[open] > summary {
+  color: var(--clay);
+  border-color: rgba(234, 106, 95, 0.4);
+}
+.dismiss-options {
+  position: absolute;
+  right: 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 148px;
+  margin-top: 6px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--ink);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+}
+.dismiss-options .micro {
+  margin: 0 0 2px;
+}
+.dismiss-options .btn.wide {
+  width: 100%;
+  justify-content: flex-start;
+  text-align: left;
+}
+
 /* Experience ask. Same weight as pay: a stated fact, not a verdict — the
    posting's number is often negotiable and the badge shouldn't imply otherwise. */
 .badge.yoe {

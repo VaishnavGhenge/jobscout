@@ -9,7 +9,17 @@
  * 45-point score floor and left both selects with no option marked selected.
  */
 export const FILTER_DEFAULTS = {
-  minScore: "45",
+  /**
+   * Moved with the scale rather than kept. Eligibility (25 points) left the
+   * score entirely and freshness dropped from ±25 to ±6, so the same role now
+   * scores roughly 25 lower and 45 would have let the off-level band back on.
+   *
+   * 50 is where "matches a role you'd take, nothing disqualifying" lands: base
+   * 44 plus a role match. Set it higher and roles titled plainly ("Software
+   * Engineer", "Golang Developer") fall off the default board, which was the
+   * first thing 55 did.
+   */
+  minScore: "50",
   elig: "open",
   sort: "score",
 } as const;

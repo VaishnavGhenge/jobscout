@@ -1,13 +1,16 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { db } from "@/db/client";
-import { applications, type Application } from "@/db/schema";
+import { applications, dismissals, type Application } from "@/db/schema";
 import {
   buildFunnel,
   freshnessBucket,
   pct,
   sliceBy,
+  summarizeDismissals,
+  DISMISS_LEVER,
   GHOST_AFTER_DAYS,
+  type DismissalSlice,
   type Slice,
 } from "@/lib/insights";
 
@@ -33,8 +36,15 @@ export default async function InsightsPage() {
     );
   }
 
-  const apps: Application[] = await db.select().from(applications);
+  const [apps, dismissed]: [Application[], { reason: string; score: number }[]] =
+    await Promise.all([
+      db.select().from(applications),
+      db
+        .select({ reason: dismissals.reason, score: dismissals.score })
+        .from(dismissals),
+    ]);
   const funnel = buildFunnel(apps);
+  const overruled = summarizeDismissals(dismissed);
 
   if (funnel.applied === 0) {
     return (
@@ -48,6 +58,7 @@ export default async function InsightsPage() {
           on the <Link href="/tracker">Tracker</Link> — from then on this page
           shows which kinds of applications get replies and which don&apos;t.
         </div>
+        <Overruled rows={overruled} />
       </>
     );
   }
@@ -178,7 +189,63 @@ export default async function InsightsPage() {
           </table>
         </section>
       ))}
+
+      <Overruled rows={overruled} />
     </>
+  );
+}
+
+/**
+ * Roles the board ranked well and you rejected anyway.
+ *
+ * Reply rates need dozens of applications before they mean anything. This needs
+ * one dismissal, which is why it's the fastest feedback in the app: a high
+ * `topScore` next to "wrong stack" is a specific instruction to go and edit
+ * `profile.offStackTech`, available the same afternoon.
+ */
+function Overruled({ rows }: { rows: DismissalSlice[] }) {
+  return (
+    <section className="slice">
+      <h2>Where the ranking disagreed with you</h2>
+      <p className="hint">
+        Grouped by why you ruled a role out. The score is what the board gave it
+        at the time, so a high one means the weights need editing, not the filter.
+      </p>
+      {rows.length === 0 ? (
+        <div className="empty">
+          Nothing dismissed yet. Use <strong>Not for me</strong> on the board and
+          pick a reason: it&apos;s the only signal here that works from a sample
+          of one.
+        </div>
+      ) : (
+        <table className="grid">
+          <thead>
+            <tr>
+              <th>Reason</th>
+              <th className="num">Dismissed</th>
+              <th className="num">Avg score</th>
+              <th className="num">Top score</th>
+              <th>Lever</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.reason}>
+                <td>{r.reason}</td>
+                <td className="num">{r.count}</td>
+                <td className="num">{r.avgScore}</td>
+                <td className="num">
+                  <b className={r.topScore >= 78 ? "bad" : ""}>{r.topScore}</b>
+                </td>
+                <td>
+                  <code>{DISMISS_LEVER[r.reason] ?? "unclassified"}</code>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </section>
   );
 }
 

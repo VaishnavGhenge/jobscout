@@ -2,6 +2,7 @@ import {
   and,
   desc,
   eq,
+  getTableColumns,
   gte,
   ilike,
   inArray,
@@ -18,10 +19,18 @@ import { companies } from "@/lib/companies";
 import { ageLabel, daysSince, timeAgo } from "@/lib/time";
 import { formatYoe } from "@/lib/yoe";
 import { queueSnapshot } from "@/lib/queue";
+import { effectiveScoreSql, freshnessFor } from "@/lib/freshness";
 import { FILTER_DEFAULTS } from "@/lib/filter-defaults";
-import { dismissJob, refreshNow, restoreJob, trackJob } from "./actions";
+import {
+  dismissJob,
+  refreshNow,
+  rescoreNow,
+  restoreJob,
+  trackJob,
+} from "./actions";
 import { SubmitButton } from "./SubmitButton";
 import { Filters } from "./Filters";
+import { DismissMenu } from "./DismissMenu";
 import { RunStatus } from "./RunStatus";
 
 export const dynamic = "force-dynamic";
@@ -44,8 +53,15 @@ type Search = {
   page?: string;
 };
 
+/**
+ * Bands for the score ring. Moved down with the scale: eligibility and freshness
+ * used to contribute 50 of the 100 points and now contribute 0 and at most 6, so
+ * the same role scores roughly 25 lower than it did. A fully aligned role tops
+ * out near 98, a target-level role with your stack in the title sits around 90,
+ * and a bare "Software Engineer" with nothing else known lands in the 50s.
+ */
 function scoreClass(s: number) {
-  return s >= 70 ? "high" : s >= 45 ? "mid" : "low";
+  return s >= 78 ? "high" : s >= 58 ? "mid" : "low";
 }
 
 const daysAgo = (n: number) => new Date(Date.now() - n * 86_400_000);
@@ -82,10 +98,27 @@ export default async function BoardPage({
   const sort = sp.sort === "recent" || sp.sort === "new" ? sp.sort : "score";
   const elig = sp.elig ?? FILTER_DEFAULTS.elig;
 
-  const filters: SQL[] = [gte(jobs.score, isNaN(minScore) ? 0 : minScore)];
+  // Today's score, not the one that was stored whenever this row was last
+  // written. Freshness decays, so the stored value is fit only and the decay is
+  // applied here: filtering and sorting both have to use the same number the
+  // card shows, or the board ranks one thing and displays another.
+  const eff = effectiveScoreSql();
+
+  const filters: SQL[] = [
+    sql`${eff} >= ${isNaN(minScore) ? 0 : minScore}::int`,
+  ];
   if (sp.q) {
     const like = `%${sp.q}%`;
-    filters.push(or(ilike(jobs.title, like), ilike(jobs.company, like))!);
+    // Descriptions are searchable now that they're stored. A title-only search
+    // couldn't find "kubernetes" or "django" in a JD that leads with "Software
+    // Engineer II", which is most of them.
+    filters.push(
+      or(
+        ilike(jobs.title, like),
+        ilike(jobs.company, like),
+        ilike(jobs.description, like),
+      )!,
+    );
   }
   if (sp.source) filters.push(eq(jobs.source, sp.source));
   if (sp.remote === "1") filters.push(eq(jobs.remote, true));
@@ -148,16 +181,16 @@ export default async function BoardPage({
 
   const order =
     sort === "recent"
-      ? [desc(jobs.postedAt), desc(jobs.score)]
+      ? [desc(jobs.postedAt), desc(eff)]
       : sort === "new"
-        ? [desc(jobs.firstSeenAt), desc(jobs.score)]
-        : [desc(jobs.score), desc(jobs.postedAt)];
+        ? [desc(jobs.firstSeenAt), desc(eff)]
+        : [desc(eff), desc(jobs.postedAt)];
 
   const page = Math.max(1, Number(sp.page) || 1);
 
   const [rows, [matched], tracked, dismissedRows, [stats], queue] = await Promise.all([
     db
-      .select()
+      .select({ ...getTableColumns(jobs), effective: eff })
       .from(jobs)
       .where(and(...filters))
       .orderBy(...order)
@@ -207,14 +240,32 @@ export default async function BoardPage({
           </p>
           <h1>Board</h1>
           <p className="subtitle" style={{ margin: 0 }}>
-            Ranked by whether a role is worth an application, not by title match.
+            Ranked by whether a role is worth an application, not by title
+            match. Freshness is applied as you read, so the number is today's.
           </p>
         </div>
-        <form action={refreshNow}>
-          <SubmitButton className="btn" pendingText="Refreshing…">
-            ↻ Refresh now
-          </SubmitButton>
-        </form>
+        <div className="rowbar-actions">
+          {/*
+            Two different questions, so two buttons. Refresh asks what's out
+            there; Rescore asks how what we already have should be ranked given
+            the current profile. They used to be the same action, which meant a
+            weight change couldn't be judged without a full crawl of every board.
+          */}
+          <form action={rescoreNow}>
+            <SubmitButton
+              className="btn ghost"
+              pendingText="Rescoring…"
+              title="Re-rank the board against src/lib/profile.ts. No refetch."
+            >
+              ⇅ Rescore
+            </SubmitButton>
+          </form>
+          <form action={refreshNow}>
+            <SubmitButton className="btn" pendingText="Refreshing…">
+              ↻ Refresh now
+            </SubmitButton>
+          </form>
+        </div>
       </div>
 
       <div className="stats">
@@ -302,20 +353,29 @@ export default async function BoardPage({
             const isTracked = trackedSet.has(`${j.source}:${j.externalId}`);
             const isDismissed = dismissedSet.has(`${j.source}:${j.externalId}`);
             const isNew = (daysSince(j.firstSeenAt) ?? 99) < 1;
+            // Recomputed here rather than read off the row, so the badge and the
+            // age in the meta line can never disagree the way they did when a
+            // 25-day-old posting still carried "posted <3d".
+            const fresh = freshnessFor(j.postedAt);
             return (
               <div
-                className={`job ${scoreClass(j.score)}${
+                className={`job ${scoreClass(j.effective)}${
                   j.eligibility === "blocked" ? " muted" : ""
                 }`}
                 key={j.id}
                 style={{ "--i": i } as React.CSSProperties}
               >
-                <div className="score-wrap" title={`Fit score ${j.score}/100`}>
+                <div
+                  className="score-wrap"
+                  title={`${j.effective}/100 (fit ${j.score}, freshness ${
+                    fresh.points >= 0 ? "+" : ""
+                  }${fresh.points})`}
+                >
                   <div
                     className="score"
-                    style={{ "--v": j.score } as React.CSSProperties}
+                    style={{ "--v": j.effective } as React.CSSProperties}
                   />
-                  <span className="n">{j.score}</span>
+                  <span className="n">{j.effective}</span>
                 </div>
                 <div className="job-main">
                   <a
@@ -354,20 +414,23 @@ export default async function BoardPage({
                     {j.yoeMin !== null && (
                       <span
                         className="badge yoe"
-                        title="Experience the posting asks for. Not scored — plenty of these hire under the stated bar."
+                        title="Experience the posting asks for. Scored as a gap above yours, not as a gate: plenty of these hire under the stated bar."
                       >
                         {formatYoe(j.yoeMin, j.yoeMax)}
                       </span>
                     )}
                     <span className="badge src">{j.source}</span>
-                    {j.reasons
-                      .filter((r) => !r.startsWith("blocked:"))
-                      .slice(0, 3)
-                      .map((r) => (
-                        <span className="badge" key={r}>
-                          {r}
-                        </span>
-                      ))}
+                    <span
+                      className={`badge ${fresh.points < 0 ? "bad-badge" : ""}`}
+                      title="Computed now, from the posting date"
+                    >
+                      {fresh.label}
+                    </span>
+                    {j.reasons.slice(0, 3).map((r) => (
+                      <span className="badge" key={r}>
+                        {r}
+                      </span>
+                    ))}
                   </div>
                 </div>
                 <div className="job-actions">
@@ -390,7 +453,7 @@ export default async function BoardPage({
                       <input type="hidden" name="url" value={j.url} />
                       <input type="hidden" name="location" value={j.location} />
                       <input type="hidden" name="remote" value={String(j.remote)} />
-                      <input type="hidden" name="score" value={j.score} />
+                      <input type="hidden" name="score" value={j.effective} />
                       <input type="hidden" name="eligibility" value={j.eligibility} />
                       <input
                         type="hidden"
@@ -403,19 +466,14 @@ export default async function BoardPage({
                     </form>
                   )}
                   {!isDismissed && !isTracked && (
-                    <form action={dismissJob}>
-                      <input type="hidden" name="source" value={j.source} />
-                      <input type="hidden" name="externalId" value={j.externalId} />
-                      <input type="hidden" name="company" value={j.company} />
-                      <input type="hidden" name="title" value={j.title} />
-                      <SubmitButton
-                        className="btn ghost small dismiss"
-                        pendingText="…"
-                        title="Rule this out — it won't come back on the next refresh"
-                      >
-                        ✕ Not for me
-                      </SubmitButton>
-                    </form>
+                    <DismissMenu
+                      action={dismissJob}
+                      source={j.source}
+                      externalId={j.externalId}
+                      company={j.company}
+                      title={j.title}
+                      score={j.effective}
+                    />
                   )}
                 </div>
               </div>

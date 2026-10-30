@@ -16,9 +16,14 @@ import type { RawPosting } from "./types";
 /**
  * Is this posting's description worth an HTTP request?
  *
- * The description feeds exactly one decision: `blockPhrases` in
- * lib/eligibility.ts. Reading that logic, blockers only ever change the verdict
- * for postings that are already in play:
+ * The description now feeds several things (the pay band, the experience ask,
+ * the stack signal, and free-text search on the board), but the decision here
+ * still turns on the one that can change a *verdict*: `blockPhrases` in
+ * lib/eligibility.ts. Everything else only refines the ranking of a role you
+ * could take, and a role you can't be hired for doesn't need a better rank.
+ *
+ * Reading that logic, blockers only ever change the verdict for postings that
+ * are already in play:
  *
  * - explicitly in a region you can work in  → blockers demote eligible → longshot
  * - borderless ("Global", "Remote")         → blockers demote it to blocked
@@ -29,6 +34,11 @@ import type { RawPosting } from "./types";
  * for it. Same for a broad-bucket region ("APAC"), which is `longshot` either
  * way. On Rippling's own board this is the difference between 138 requests and
  * roughly half that.
+ *
+ * The rows skipped here are the reason lib/rescore.ts carries facts forward
+ * rather than re-parsing: they have no stored body and never will, so scoring
+ * has to be told what was already known about them instead of reading an empty
+ * string and concluding nothing.
  */
 export function descriptionCouldMatter(posting: RawPosting): boolean {
   if (!isEngineeringRole(posting.title)) return false;

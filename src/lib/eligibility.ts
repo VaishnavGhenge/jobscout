@@ -1,7 +1,20 @@
 import type { Company } from "./companies";
-import type { RawPosting } from "./connectors";
 import { profile, eligibleRegions } from "./profile";
 import { parseRegions, regionsInclude, type Region } from "./regions";
+
+/**
+ * The location and text fields eligibility needs. Structural rather than
+ * `RawPosting` so a stored `jobs` row can be reassessed without a refetch,
+ * which is what makes changing `profile.basedIn` a rescore instead of a
+ * three-minute crawl of 84 boards.
+ */
+export interface Assessable {
+  title: string;
+  description: string;
+  location: string;
+  locations: string[];
+  countryCode: string | null;
+}
 
 /**
  * Can you actually be hired for this, or would you be screened out before a
@@ -33,15 +46,23 @@ function findBlockers(description: string): string[] {
 }
 
 export function assessEligibility(
-  posting: RawPosting,
+  posting: Assessable,
   company: Company,
+  /**
+   * Blockers already known for this posting, used instead of re-reading the
+   * description. Needed when the body isn't stored: SmartRecruiters and Rippling
+   * rows for regions you'd need sponsorship for never get one fetched (see
+   * lib/connectors/detail.ts), and re-deriving from an empty string would report
+   * "no blockers found" and quietly relax the verdict.
+   */
+  knownBlockers?: string[],
 ): Assessment {
   const regions = parseRegions([
     posting.location,
     ...posting.locations,
     posting.countryCode,
   ]);
-  const blockers = findBlockers(posting.description);
+  const blockers = knownBlockers ?? findBlockers(posting.description);
 
   const home = profile.basedIn;
   // Deliberately an exact check, not `regionCovers`: a company hiring in APAC

@@ -6,11 +6,14 @@ import { and, eq, sql } from "drizzle-orm";
 import { requireDb } from "@/db/client";
 import {
   applications,
+  dismissReason,
   dismissals,
   type ApplicationStatus,
+  type DismissReason,
   type EligibilityLevel,
 } from "@/db/schema";
 import { enqueueAll } from "@/lib/queue";
+import { rescoreAll } from "@/lib/rescore";
 import { drain } from "@/lib/worker";
 
 /** Statuses that can only be reached after somebody replied to you. */
@@ -200,6 +203,17 @@ export async function dismissJob(formData: FormData): Promise<void> {
   const db = requireDb();
   const str = (k: string) => String(formData.get(k) ?? "");
 
+  // The reason is what makes a dismissal worth recording. Without it the table
+  // only ever said "no" and the scoring had nothing to learn from: the single
+  // dismissal on record was a C#/Angular role sitting at 100, and the board had
+  // no way to notice that it had been overruled.
+  const raw = str("reason");
+  const reason: DismissReason = (
+    dismissReason.enumValues as readonly string[]
+  ).includes(raw)
+    ? (raw as DismissReason)
+    : "other";
+
   await db
     .insert(dismissals)
     .values({
@@ -207,12 +221,27 @@ export async function dismissJob(formData: FormData): Promise<void> {
       externalId: str("externalId"),
       company: str("company"),
       title: str("title"),
+      reason,
+      score: Number(formData.get("score") ?? 0),
     })
     .onConflictDoNothing({
       target: [dismissals.source, dismissals.externalId],
     });
 
   revalidatePath("/");
+}
+
+/**
+ * Re-score the board against the current profile, no refetch.
+ *
+ * The counterpart to "Refresh now": refresh answers "what's out there", this
+ * answers "given what I've told you about myself, how should it be ranked".
+ * Separating them is the point, since a tuning change used to require a full
+ * crawl before it could be judged.
+ */
+export async function rescoreNow(): Promise<void> {
+  await rescoreAll();
+  revalidateAll();
 }
 
 /** Put a dismissed role back on the board. */
