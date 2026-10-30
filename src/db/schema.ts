@@ -19,6 +19,25 @@ export const applicationStatus = pgEnum("application_status", [
   "rejected",
 ]);
 
+/**
+ * How the application reached the company, as opposed to `source`, which is
+ * where you found the role.
+ *
+ * The two used to share one column, and that hid the one pattern the tracker
+ * had to offer: applications sent through a recruiter's Google Form, linked from
+ * a LinkedIn post, got shortlisted, and ATS applications didn't. A role found on
+ * LinkedIn can go in through any of these, so "linkedin" as a source said
+ * nothing about which door you used. Labels live in lib/sources.ts.
+ */
+export const applicationChannel = pgEnum("application_channel", [
+  "ats",
+  "hr_form",
+  "recruiter_direct",
+  "referral",
+  "quick_apply",
+  "other",
+]);
+
 /** Whether you could actually be hired for a role. See lib/eligibility.ts. */
 export const eligibilityLevel = pgEnum("eligibility_level", [
   "eligible",
@@ -135,6 +154,8 @@ export const applications = pgTable(
     title: text("title").notNull(),
     url: text("url").notNull(),
     status: applicationStatus("status").notNull().default("saved"),
+    /** How you applied. See `applicationChannel`. Board rows go in via the ATS. */
+    channel: applicationChannel("channel").notNull().default("ats"),
     notes: text("notes").notNull().default(""),
 
     // --- Snapshot of the posting, for response-rate analysis ---------------
@@ -150,6 +171,14 @@ export const applications = pgTable(
     appliedAt: timestamp("applied_at", { withTimezone: true }),
     /** First human or automated reply of any kind, including a rejection. */
     firstResponseAt: timestamp("first_response_at", { withTimezone: true }),
+    /**
+     * First time this got past screening: a call, an interview, an assignment.
+     * A rejection counts as a reply, so reply rate alone can't tell a channel
+     * that shortlists you from one that sends polite no's. Kept as its own stamp
+     * because `status` moves on: an interview that ends in a rejection still
+     * counts here.
+     */
+    shortlistedAt: timestamp("shortlisted_at", { withTimezone: true }),
 
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
@@ -295,3 +324,4 @@ export type RefreshTask = typeof refreshTasks.$inferSelect;
 export type TaskState = (typeof taskState.enumValues)[number];
 export type EligibilityLevel = (typeof eligibilityLevel.enumValues)[number];
 export type DismissReason = (typeof dismissReason.enumValues)[number];
+export type ApplicationChannel = (typeof applicationChannel.enumValues)[number];

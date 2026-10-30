@@ -493,7 +493,8 @@ label.check input {
   margin: 14px 2px 12px;
 }
 /* Secondary clause on an already-quiet line. */
-.count .dim {
+.count .dim,
+.grid .dim {
   opacity: 0.65;
 }
 

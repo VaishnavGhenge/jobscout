@@ -10,8 +10,10 @@ export interface TrackerFilterState {
   q: string;
   /** "" | "waiting" | "ghosted" | "replied" — where the ball is. */
   reply: string;
-  /** Applied via; "" for any. */
+  /** Found on; "" for any. */
   src: string;
+  /** Applied through; "" for any. */
+  ch: string;
   /** "updated" (default) | "waiting" | "applied". */
   sort: string;
 }
@@ -26,8 +28,13 @@ export interface TrackerFilterState {
  */
 export function TrackerFilters({
   sources,
+  channels,
   ...initial
-}: TrackerFilterState & { sources: string[] }) {
+}: TrackerFilterState & {
+  sources: string[];
+  /** Only the channels you've actually used, so the list stays short. */
+  channels: { key: string; short: string }[];
+}) {
   const router = useRouter();
   const pathname = usePathname();
   const params = useSearchParams();
@@ -69,6 +76,7 @@ export function TrackerFilters({
     Boolean(initial.q) ||
     Boolean(initial.reply) ||
     Boolean(initial.src) ||
+    Boolean(initial.ch) ||
     (initial.sort !== "" && initial.sort !== TRACKER_DEFAULTS.sort);
 
   function clear() {
@@ -105,12 +113,24 @@ export function TrackerFilters({
       <select
         value={initial.src}
         onChange={(e) => apply({ src: e.target.value })}
-        aria-label="Applied via"
+        aria-label="Found on"
       >
-        <option value="">Any source</option>
+        <option value="">Found anywhere</option>
         {sources.map((s) => (
           <option key={s} value={s}>
             {s}
+          </option>
+        ))}
+      </select>
+      <select
+        value={initial.ch}
+        onChange={(e) => apply({ ch: e.target.value })}
+        aria-label="Applied through"
+      >
+        <option value="">Any channel</option>
+        {channels.map((c) => (
+          <option key={c.key} value={c.key}>
+            via {c.short}
           </option>
         ))}
       </select>

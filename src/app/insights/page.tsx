@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { db } from "@/db/client";
+import { channelLabel } from "@/lib/sources";
 import { applications, dismissals, type Application } from "@/db/schema";
 import {
   buildFunnel,
@@ -65,6 +66,11 @@ export default async function InsightsPage() {
 
   const slices: { title: string; hint: string; rows: Slice[] }[] = [
     {
+      title: "By channel",
+      hint: "How the application reached them. Compare shortlist rates, not reply rates: a rejection counts as a reply.",
+      rows: sliceBy(apps, (a) => channelLabel(a.channel)),
+    },
+    {
       title: "By eligibility",
       hint: "If blocked roles reply at ~0%, the region filter is earning its keep.",
       rows: sliceBy(apps, (a) => a.eligibility),
@@ -117,7 +123,8 @@ export default async function InsightsPage() {
           tone="good"
           href="/tracker?reply=replied"
         />
-        <Stat n={funnel.interviewing} label="interviewing" tone="good" />
+        <Stat n={funnel.shortlisted} label="shortlisted" tone="good" />
+        <Stat n={funnel.interviewing} label="interviewing now" tone="good" />
         <Stat n={funnel.offers} label="offers" tone="good" />
         <Stat
           n={funnel.waiting}
@@ -137,6 +144,10 @@ export default async function InsightsPage() {
         <div>
           <span className="big">{pct(funnel.replyRate)}</span>
           <span className="lbl">of applications get any reply</span>
+        </div>
+        <div>
+          <span className="big">{pct(funnel.shortlistRate)}</span>
+          <span className="lbl">get shortlisted</span>
         </div>
         {funnel.medianDaysToReply !== null && (
           <div>
@@ -165,6 +176,7 @@ export default async function InsightsPage() {
                 <th className="num">Applied</th>
                 <th className="num">Replied</th>
                 <th className="num">Rate</th>
+                <th className="num">Shortlisted</th>
                 <th className="bar-col" />
               </tr>
             </thead>
@@ -175,6 +187,9 @@ export default async function InsightsPage() {
                   <td className="num">{r.applied}</td>
                   <td className="num">{r.replied}</td>
                   <td className="num">{pct(r.rate)}</td>
+                  <td className="num">
+                    {r.shortlisted} <span className="dim">({pct(r.shortlistRate)})</span>
+                  </td>
                   <td className="bar-col">
                     <span className="bar-track">
                       <span

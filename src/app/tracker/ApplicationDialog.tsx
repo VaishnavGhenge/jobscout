@@ -2,7 +2,7 @@
 
 import { useRef } from "react";
 import type { Application, EligibilityLevel } from "@/db/schema";
-import { MANUAL_SOURCES, isManualSource } from "@/lib/sources";
+import { CHANNELS, MANUAL_SOURCES, isManualSource } from "@/lib/sources";
 import { saveApplication } from "../actions";
 import { SubmitButton } from "../SubmitButton";
 import { STATUS_OPTIONS } from "./StatusSelect";
@@ -84,7 +84,7 @@ export function ApplicationDialog({
           <p className="modal-hint">
             {app
               ? "Yours to correct — nothing here is overwritten by a refresh."
-              : "For roles you applied to outside the board — Wellfound, LinkedIn, a referral."}
+              : "For roles you applied to outside the board: an HR form from a LinkedIn post, a referral, a DM."}
           </p>
 
           {app && <input type="hidden" name="id" value={app.id} />}
@@ -122,9 +122,26 @@ export function ApplicationDialog({
             />
           </label>
 
+          {/* How you applied, which is not where you found it: a Greenhouse
+              role can still go in through the recruiter. Editable on every row,
+              scraped or not, because the board can't know which door you used. */}
+          <label className="field">
+            <span>Applied through</span>
+            <select
+              name="channel"
+              defaultValue={app?.channel ?? (sourceEditable ? CHANNELS[0].key : "ats")}
+            >
+              {CHANNELS.map((c) => (
+                <option key={c.key} value={c.key}>
+                  {c.label}
+                </option>
+              ))}
+            </select>
+          </label>
+
           <div className="modal-grid">
             <label className="field">
-              <span>Applied via</span>
+              <span>Found on</span>
               {sourceEditable ? (
                 <select
                   name="source"
@@ -214,6 +231,15 @@ export function ApplicationDialog({
               defaultChecked={app?.remote ?? false}
             />
             Remote
+          </label>
+
+          <label className="check">
+            <input
+              type="checkbox"
+              name="shortlisted"
+              defaultChecked={Boolean(app?.shortlistedAt)}
+            />
+            Shortlisted (call, interview or assignment), even if it ended in a no
           </label>
 
           <label className="field">

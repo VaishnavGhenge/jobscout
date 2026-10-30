@@ -12,7 +12,7 @@ import {
   pct,
   GHOST_AFTER_DAYS,
 } from "@/lib/insights";
-import { isManualSource } from "@/lib/sources";
+import { CHANNELS, channelLabel, isManualSource } from "@/lib/sources";
 import { daysSince } from "@/lib/time";
 import { markReplied, removeApplication } from "../actions";
 import { ApplicationDialog } from "./ApplicationDialog";
@@ -37,15 +37,17 @@ type Search = {
   q?: string;
   /** "waiting" | "ghosted" | "replied"; "" for any. */
   reply?: string;
-  /** Applied via. */
+  /** Found on. */
   src?: string;
+  /** Applied through. See applications.channel. */
+  ch?: string;
   sort?: string;
 };
 
 /** Everything a search should look inside — notes included, that's where the
  *  recruiter's name usually is. */
 function haystack(a: Application): string {
-  return `${a.company} ${a.title} ${a.location} ${a.notes} ${a.source}`.toLowerCase();
+  return `${a.company} ${a.title} ${a.location} ${a.notes} ${a.source} ${channelLabel(a.channel)}`.toLowerCase();
 }
 
 /** Sort within a column. Null dates sink: nothing to wait on, nothing to rank. */
@@ -87,6 +89,7 @@ export default async function TrackerPage({
   const q = (sp.q ?? "").trim().toLowerCase();
   const reply = sp.reply ?? "";
   const src = sp.src ?? "";
+  const ch = sp.ch ?? "";
   const sort = sp.sort ?? TRACKER_DEFAULTS.sort;
 
   const apps: Application[] = await db
@@ -103,6 +106,7 @@ export default async function TrackerPage({
   const shown = apps.filter((a) => {
     if (q && !haystack(a).includes(q)) return false;
     if (src && a.source !== src) return false;
+    if (ch && a.channel !== ch) return false;
     if (reply === "waiting" && !isWaiting(a)) return false;
     if (reply === "ghosted" && !isGhosted(a)) return false;
     if (reply === "replied" && !hasReplied(a)) return false;
@@ -111,7 +115,7 @@ export default async function TrackerPage({
 
   const cmp = comparator(sort);
   const ordered = cmp ? [...shown].sort(cmp) : shown;
-  const filtering = Boolean(q || reply || src);
+  const filtering = Boolean(q || reply || src || ch);
   const byStatus = (s: ApplicationStatus) =>
     ordered.filter((a) => a.status === s);
 
@@ -198,8 +202,10 @@ export default async function TrackerPage({
             q={sp.q ?? ""}
             reply={reply}
             src={src}
+            ch={ch}
             sort={sort}
             sources={sources}
+            channels={CHANNELS.filter((c) => apps.some((a) => a.channel === c.key))}
           />
 
           <p className="count">
@@ -255,6 +261,14 @@ export default async function TrackerPage({
                           <div className="card-tags">
                             {isManualSource(a.source) && (
                               <span className="badge">{a.source}</span>
+                            )}
+                            {a.channel !== "ats" && (
+                              <span className="badge" title="Applied through">
+                                via {channelLabel(a.channel)}
+                              </span>
+                            )}
+                            {a.shortlistedAt && (
+                              <span className="badge good-badge">shortlisted</span>
                             )}
                             {a.eligibility !== "eligible" && (
                               <span className={`badge elig ${a.eligibility}`}>

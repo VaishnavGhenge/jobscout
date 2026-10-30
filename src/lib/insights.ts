@@ -17,6 +17,11 @@ export function hasReplied(a: Application): boolean {
   return a.firstResponseAt !== null;
 }
 
+/** Got past screening at some point, whatever the status says now. */
+export function wasShortlisted(a: Application): boolean {
+  return a.shortlistedAt !== null;
+}
+
 export function isGhosted(a: Application): boolean {
   if (!a.appliedAt || a.firstResponseAt) return false;
   const d = daysSince(a.appliedAt);
@@ -61,12 +66,16 @@ export interface Funnel {
   tracked: number;
   applied: number;
   replied: number;
+  /** Ever got past screening. Unlike `interviewing`, survives a later rejection. */
+  shortlisted: number;
   interviewing: number;
   offers: number;
   ghosted: number;
   waiting: number;
   /** Share of applications that got any reply at all. Null until you apply. */
   replyRate: number | null;
+  /** Share of applications that got past screening. Null until you apply. */
+  shortlistRate: number | null;
   /** Median days from applying to first reply, across replies received. */
   medianDaysToReply: number | null;
 }
@@ -74,6 +83,7 @@ export interface Funnel {
 export function buildFunnel(apps: Application[]): Funnel {
   const applied = apps.filter((a) => a.appliedAt !== null);
   const replied = applied.filter(hasReplied);
+  const shortlisted = applied.filter(wasShortlisted);
 
   const gaps = replied
     .map(daysToReply)
@@ -84,11 +94,13 @@ export function buildFunnel(apps: Application[]): Funnel {
     tracked: apps.length,
     applied: applied.length,
     replied: replied.length,
+    shortlisted: shortlisted.length,
     interviewing: apps.filter((a) => a.status === "interviewing").length,
     offers: apps.filter((a) => a.status === "offer").length,
     ghosted: applied.filter(isGhosted).length,
     waiting: applied.filter(isWaiting).length,
     replyRate: applied.length ? replied.length / applied.length : null,
+    shortlistRate: applied.length ? shortlisted.length / applied.length : null,
     medianDaysToReply: gaps.length ? gaps[Math.floor(gaps.length / 2)] : null,
   };
 }
@@ -98,6 +110,12 @@ export interface Slice {
   applied: number;
   replied: number;
   rate: number | null;
+  shortlisted: number;
+  /**
+   * The rate that separates channels. A rejection is a reply, so a channel that
+   * answers every application with a no has a perfect reply rate and a zero here.
+   */
+  shortlistRate: number | null;
 }
 
 /**
@@ -108,14 +126,18 @@ export function sliceBy(
   apps: Application[],
   key: (a: Application) => string,
 ): Slice[] {
-  const groups = new Map<string, { applied: number; replied: number }>();
+  const groups = new Map<
+    string,
+    { applied: number; replied: number; shortlisted: number }
+  >();
 
   for (const a of apps) {
     if (!a.appliedAt) continue;
     const label = key(a);
-    const g = groups.get(label) ?? { applied: 0, replied: 0 };
+    const g = groups.get(label) ?? { applied: 0, replied: 0, shortlisted: 0 };
     g.applied += 1;
     if (hasReplied(a)) g.replied += 1;
+    if (wasShortlisted(a)) g.shortlisted += 1;
     groups.set(label, g);
   }
 
@@ -125,6 +147,8 @@ export function sliceBy(
       applied: g.applied,
       replied: g.replied,
       rate: g.applied ? g.replied / g.applied : null,
+      shortlisted: g.shortlisted,
+      shortlistRate: g.applied ? g.shortlisted / g.applied : null,
     }))
     .sort((a, b) => b.applied - a.applied);
 }

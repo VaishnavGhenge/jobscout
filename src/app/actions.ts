@@ -13,6 +13,7 @@ import {
   type EligibilityLevel,
 } from "@/db/schema";
 import { enqueueAll } from "@/lib/queue";
+import { isChannel } from "@/lib/sources";
 import { rescoreAll } from "@/lib/rescore";
 import { drain } from "@/lib/worker";
 
@@ -22,6 +23,9 @@ const IMPLIES_RESPONSE: ApplicationStatus[] = [
   "offer",
   "rejected",
 ];
+
+/** Statuses that mean you got past screening. See `applications.shortlistedAt`. */
+const IMPLIES_SHORTLIST: ApplicationStatus[] = ["interviewing", "offer"];
 
 function revalidateAll() {
   revalidatePath("/");
@@ -78,6 +82,7 @@ export async function saveApplication(formData: FormData): Promise<void> {
   const id = rawId ? Number(rawId) : null;
   const status = (str("status") || "saved") as ApplicationStatus;
   const source = str("source");
+  const rawChannel = str("channel");
 
   // A date input gives "2026-07-24". Pin it to UTC midnight so the value reads
   // back as the same day on both the server and the browser — a local-midnight
@@ -101,6 +106,13 @@ export async function saveApplication(formData: FormData): Promise<void> {
       ? null
       : undefined;
 
+  // Same shape as the reply date: a ticked box keeps the first stamp, an
+  // unticked one clears it, and an interviewing or offer status ticks it for you.
+  // Logging an old form application that went to interview and then a rejection
+  // is exactly the case the status alone would lose.
+  const shortlisted =
+    formData.get("shortlisted") === "on" || IMPLIES_SHORTLIST.includes(status);
+
   const fields = {
     company,
     title,
@@ -111,6 +123,7 @@ export async function saveApplication(formData: FormData): Promise<void> {
     remote: formData.get("remote") === "on",
     eligibility: (str("eligibility") || "eligible") as EligibilityLevel,
     appliedAt,
+    ...(isChannel(rawChannel) ? { channel: rawChannel } : {}),
   };
 
   if (id) {
@@ -124,11 +137,14 @@ export async function saveApplication(formData: FormData): Promise<void> {
         ...(source ? { source } : {}),
         ...(reply !== undefined
           ? { firstResponseAt: reply }
-          : IMPLIES_RESPONSE.includes(status)
+          : IMPLIES_RESPONSE.includes(status) || shortlisted
             ? {
                 firstResponseAt: sql`coalesce(${applications.firstResponseAt}, now())`,
               }
             : {}),
+        shortlistedAt: shortlisted
+          ? sql`coalesce(${applications.shortlistedAt}, now())`
+          : null,
         updatedAt: sql`now()`,
       })
       .where(eq(applications.id, id));
@@ -138,7 +154,9 @@ export async function saveApplication(formData: FormData): Promise<void> {
       source: source || "other",
       externalId: crypto.randomUUID(),
       firstResponseAt:
-        reply ?? (IMPLIES_RESPONSE.includes(status) ? new Date() : null),
+        reply ??
+        (IMPLIES_RESPONSE.includes(status) || shortlisted ? new Date() : null),
+      shortlistedAt: shortlisted ? new Date() : null,
     });
   }
 
@@ -161,6 +179,9 @@ export async function setStatus(formData: FormData): Promise<void> {
   }
   if (IMPLIES_RESPONSE.includes(status)) {
     patch.firstResponseAt = sql`coalesce(${applications.firstResponseAt}, now())`;
+  }
+  if (IMPLIES_SHORTLIST.includes(status)) {
+    patch.shortlistedAt = sql`coalesce(${applications.shortlistedAt}, now())`;
   }
 
   await db.update(applications).set(patch).where(eq(applications.id, id));
