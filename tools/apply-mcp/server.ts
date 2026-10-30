@@ -39,6 +39,7 @@ import { isEngineeringRole } from "@/lib/scoring";
 import {
   UA, decodeEntities, guestDetail, pool, score, searchLinkedIn, sleep,
 } from "../lib/linkedin";
+import { dedupePosts, formatPost, triagePost, type RawPost } from "../lib/posts";
 
 const PORT = Number(process.env.APPLY_CDP_PORT ?? 9222);
 const PROFILE =
@@ -305,15 +306,22 @@ const GTYPE: Record<number, FieldType | null> = {
   7: "grid", 9: "date", 10: "time", 13: "file", 6: null, 8: null, 11: null, 12: null,
 };
 
-async function resolveShort(url: string): Promise<string> {
-  if (!/forms\.gle|lnkd\.in/.test(url)) return url;
+/**
+ * Follows a short link to where it really goes. Recruiter posts wrap every link
+ * in lnkd.in, which answers 200 with an interstitial rather than redirecting,
+ * and the target behind it is often another shortener (bit.ly, forms.gle).
+ */
+async function resolveShort(url: string, depth = 0): Promise<string> {
+  if (depth > 5 || /docs\.google\.com\/forms/.test(url)) return url;
   const r = await fetch(url, { redirect: "manual", headers: { "user-agent": UA } });
   const loc = r.headers.get("location");
-  if (loc) return resolveShort(new URL(loc, url).href);
+  if (loc) return resolveShort(new URL(loc, url).href, depth + 1);
   if (/lnkd\.in/.test(url)) {
     const h = await r.text();
-    const m = h.match(/href="(https?:\/\/(?!www\.linkedin\.com|lnkd\.in)[^"]+)"/);
-    if (m) return decodeEntities(m[1]);
+    const m =
+      h.match(/external_url_click"[^>]*href="([^"]+)"/) ??
+      h.match(/href="(https?:\/\/(?!(?:[\w-]+\.)*(?:linkedin\.com|licdn\.com|lnkd\.in))[^"]+)"/);
+    if (m) return resolveShort(decodeEntities(m[1]), depth + 1);
   }
   return url;
 }
@@ -690,55 +698,110 @@ server.registerTool(
   },
 );
 
+/** One post search in the work tab: scroll, expand "…more", read posts and links. */
+async function scrapePosts(
+  query: string,
+  days: "1" | "7" | "30",
+  limit: number,
+  sort: "date_posted" | "relevance",
+): Promise<RawPost[] | "login"> {
+  const p = await tab("work");
+  const range = days === "1" ? "past-24h" : days === "7" ? "past-week" : "past-month";
+  const u = `https://www.linkedin.com/search/results/content/?keywords=${encodeURIComponent(query)}&datePosted=%22${range}%22&sortBy=%22${sort}%22`;
+  await p.goto(u, { waitUntil: "domcontentloaded" });
+  if (/authwall|login/.test(p.url())) return "login";
+  const feedPosts = () =>
+    p.evaluate(() => Array.from(document.querySelectorAll("h2")).filter((h) => h.textContent?.trim() === "Feed post").length);
+  await p
+    .waitForFunction(() => Array.from(document.querySelectorAll("h2")).some((h) => h.textContent?.trim() === "Feed post"), null, { timeout: 15000 })
+    .catch(() => {});
+  let last = -1;
+  for (let i = 0; i < 8; i++) {
+    const c = await feedPosts();
+    if (c >= limit || c === last) break;
+    last = c;
+    await p.mouse.wheel(0, 4000);
+    await p
+      .waitForFunction((n) => Array.from(document.querySelectorAll("h2")).filter((h) => h.textContent?.trim() === "Feed post").length > n, c, { timeout: 2500 })
+      .catch(() => {});
+  }
+  // Form links usually sit below the fold of a post, behind "…more".
+  await p.evaluate(() =>
+    document.querySelectorAll("button").forEach((b) => {
+      if (/^\s*(…\s*)?(see )?more\s*$/i.test(b.innerText)) b.click();
+    }),
+  );
+  await sleep(400);
+  const raw = await p.evaluate((max) => {
+    return Array.from(document.querySelectorAll("h2"))
+      .filter((h) => h.textContent?.trim() === "Feed post")
+      .slice(0, max)
+      .map((h) => {
+        const el = h.parentElement as HTMLElement;
+        const t = el.innerText.replace(/\s+/g, " ").replace(/^Feed post\s*/, "").trim();
+        const hrefs = Array.from(el.querySelectorAll("a")).map((a) => a.href);
+        const post = hrefs.find((x) => /feed\/update|\/posts\//.test(x)) ?? null;
+        const links = Array.from(
+          new Set([...(t.match(/https?:\/\/lnkd\.in\/[\w-]+/g) ?? []), ...hrefs.filter((x) => /lnkd\.in|forms\.gle|docs\.google\.com\/forms/.test(x))]),
+        );
+        return { t, post, links };
+      });
+  }, limit);
+  return Promise.all(
+    raw.map(async (x) => ({
+      text: x.t.replace(/\s*(Like|Comment|Repost|Send)(\s+(Like|Comment|Repost|Send))*\s*$/, ""),
+      post: x.post,
+      links: (await Promise.all(x.links.slice(0, 4).map((l) => resolveShort(l).catch(() => l)))).filter(
+        (l) => !/licdn\.com|linkedin\.com\/(in|company)\//.test(l),
+      ),
+    })),
+  );
+}
+
 server.registerTool(
   "posts_search",
   {
     description:
-      "Search LinkedIn posts (recruiter hiring posts, often with a Google Form). Returns author, age, text and resolved form/apply links. Uses the logged-in browser.",
+      "Find recruiter hiring posts on LinkedIn (where Google Form applications live) and return them triaged: one ranked line per post with role, company, location, years asked, apply route (google-form/ats/careers/email/dm) and fit score from profile.ts. Drops open-to-work posts, non-hiring posts, internships, big YOE gaps and locations outside profile.locations, and says how many. Give role phrases, not sentences: each becomes its own `\"hiring\" AND \"<role>\"` search, run sorted by latest and by relevance. Measured on LinkedIn: plain multi-word queries match any word (a motion designer for 'hiring python developer'), OR groups drop precision to ~67%, one narrow boolean query per role keeps it near 100%. Uses the logged-in browser, so keep it to a few calls a day.",
     inputSchema: {
-      query: z.string(),
+      roles: z.array(z.string()).min(1).max(6).describe('role phrases, e.g. ["python developer", "backend developer", "django"]'),
       days: z.enum(["1", "7", "30"]).default("7"),
-      limit: z.number().int().min(1).max(30).default(12),
-      textChars: z.number().int().default(450),
+      sort: z.enum(["both", "latest", "relevance"]).default("both"),
+      perQuery: z.number().int().min(3).max(30).default(12).describe("posts read per search; LinkedIn serves 3 per page"),
+      textChars: z.number().int().default(0).describe("post text to include per kept post"),
+      includeDropped: z.boolean().default(false),
+      includeInternships: z.boolean().default(false),
+      query: z.string().optional().describe("raw LinkedIn query instead of roles, for boolean searches you write yourself"),
     },
   },
-  async ({ query, days, limit, textChars }) => {
-    const p = await tab("work");
-    const range = days === "1" ? "past-24h" : days === "7" ? "past-week" : "past-month";
-    const u = `https://www.linkedin.com/search/results/content/?keywords=${encodeURIComponent(query)}&datePosted=%22${range}%22&sortBy=%22date_posted%22`;
-    await p.goto(u, { waitUntil: "domcontentloaded" });
-    if (/authwall|login/.test(p.url())) return text("LinkedIn login needed in the apply Chrome window.");
-    const count = () => p.evaluate(() => Array.from(document.querySelectorAll("h2")).filter((h) => h.textContent?.trim() === "Feed post").length);
-    await p.waitForFunction(() => Array.from(document.querySelectorAll("h2")).some((h) => h.textContent?.trim() === "Feed post"), null, { timeout: 15000 }).catch(() => {});
-    let last = -1;
-    for (let i = 0; i < 6; i++) {
-      const c = await count();
-      if (c >= limit || c === last) break;
-      last = c;
-      await p.mouse.wheel(0, 4000);
-      await p.waitForFunction((n) => Array.from(document.querySelectorAll("h2")).filter((h) => h.textContent?.trim() === "Feed post").length > n, c, { timeout: 2500 }).catch(() => {});
+  async ({ roles, days, sort, perQuery, textChars, includeDropped, includeInternships, query }) => {
+    const queries = query ? [query] : roles.map((r) => `"hiring" AND "${r.replace(/"/g, "")}"`);
+    const sorts: ("date_posted" | "relevance")[] =
+      sort === "both" ? ["date_posted", "relevance"] : [sort === "latest" ? "date_posted" : "relevance"];
+    const raw: RawPost[] = [];
+    for (const q of queries) {
+      for (const so of sorts) {
+        const r = await scrapePosts(q, days, perQuery, so);
+        if (r === "login") return text("LinkedIn login needed in the apply Chrome window.");
+        raw.push(...r);
+      }
     }
-    const posts = await p.evaluate((max) => {
-      return Array.from(document.querySelectorAll("h2"))
-        .filter((h) => h.textContent?.trim() === "Feed post")
-        .slice(0, max)
-        .map((h) => {
-          const el = h.parentElement as HTMLElement;
-          const t = el.innerText.replace(/\s+/g, " ").replace(/^Feed post\s*/, "").trim();
-          const hrefs = Array.from(el.querySelectorAll("a")).map((a) => a.href);
-          const post = hrefs.find((x) => /feed\/update|\/posts\//.test(x)) ?? null;
-          const links = Array.from(new Set([...(t.match(/https?:\/\/lnkd\.in\/[\w-]+/g) ?? []), ...hrefs.filter((x) => /lnkd\.in|forms\.gle|docs\.google\.com\/forms/.test(x))]));
-          return { t, post, links };
-        });
-    }, limit);
-    const out = await Promise.all(
-      posts.map(async (x, i) => {
-        const links = await Promise.all(x.links.slice(0, 3).map((l) => resolveShort(l).catch(() => l)));
-        const body = x.t.replace(/\s*(Like|Comment|Repost|Send)(\s+(Like|Comment|Repost|Send))*\s*$/, "");
-        return `#${i + 1} ${body.slice(0, textChars)}${links.length ? `\n   links: ${links.join(" ")}` : ""}${x.post ? `\n   post: ${x.post}` : ""}`;
-      }),
-    );
-    return text(`${posts.length} posts\n${out.join("\n")}`);
+    const triaged = dedupePosts(raw.map((r) => triagePost(r, { includeInternships })));
+    const kept = triaged.filter((t) => !t.drop).sort((a, b) => b.score - a.score);
+    const dropped = triaged.filter((t) => t.drop);
+    const why = new Map<string, number>();
+    for (const d of dropped) {
+      const k = d.drop!.replace(/\(.*\)|in .*|asks \d+/, (m) => (m.startsWith("asks") ? "asks too many" : "")).trim();
+      why.set(k, (why.get(k) ?? 0) + 1);
+    }
+    const head = `${raw.length} posts from ${queries.length * sorts.length} searches, ${raw.length - triaged.length} duplicates · kept ${kept.length} · dropped ${dropped.length}${
+      why.size ? `: ${[...why.entries()].sort((a, b) => b[1] - a[1]).map(([k, n]) => `${n} ${k}`).join(", ")}` : ""
+    }`;
+    const lines = kept.map((t, i) => formatPost(t, i + 1, textChars));
+    if (includeDropped) {
+      lines.push("dropped:", ...dropped.map((d) => `- ${d.role} | ${d.company} | ${d.location}: ${d.drop}`));
+    }
+    return text([head, "score | role | company | location | years | age | apply", ...lines].join("\n"));
   },
 );
 

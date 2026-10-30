@@ -39,6 +39,23 @@ export const profile = {
    */
   yearsExperience: 2,
 
+  /**
+   * Where you'd actually go. Separate from eligibility: a Noida role is one you
+   * *can* be hired for, it just isn't one you want, and a Berlin role is one you
+   * can't be hired for unless the post says it will sponsor you.
+   *
+   * Used by the watcher and post search to drop non-matches outright, with the
+   * reason shown. A post that names no location is kept, not guessed at.
+   */
+  locations: {
+    /** On-site or hybrid in these is fine. Matched as words, any spelling listed. */
+    cities: ["pune", "bangalore", "bengaluru", "hyderabad", "mumbai", "navi mumbai", "thane"],
+    /** Remote is fine when it's open to someone in India: India, US-remote or anywhere. */
+    remote: true,
+    /** On-site outside India only when the post offers sponsorship or relocation. */
+    abroadIfSponsored: true,
+  },
+
   // Titles that signal a role you'd actually take. Modest positive: nearly
   // every engineering posting contains one of these, so it can't carry weight.
   roleKeywords: [
