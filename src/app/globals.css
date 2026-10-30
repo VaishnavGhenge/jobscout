@@ -372,6 +372,13 @@ h1 {
 .filters.updating {
   opacity: 0.5;
 }
+/* Desktop: the wrapper vanishes and its controls lay out as before. */
+.filters-more {
+  display: contents;
+}
+.filters-toggle {
+  display: none;
+}
 
 .search {
   position: relative;
@@ -617,12 +624,40 @@ label.check input {
   color: var(--dim);
   font-weight: 500;
 }
+/* Posting age carries the freshness signal that used to be its own chip. */
+.job-meta .age.fresh {
+  color: var(--mint);
+}
+.job-meta .age.old {
+  color: var(--clay);
+}
+.job-meta .src {
+  opacity: 0.7;
+}
 
 .badges {
   display: flex;
   flex-wrap: wrap;
   gap: 5px;
   margin-top: 9px;
+}
+.badges:empty {
+  display: none;
+}
+/* Content chips (a stack list, a warning) read as text, so they drop the
+   uppercase tracking the status chips use. */
+.badge.fit,
+.badge.warn {
+  text-transform: none;
+  letter-spacing: 0.02em;
+}
+.badge.fit {
+  color: var(--mint);
+  border-color: rgba(85, 210, 154, 0.3);
+}
+.badge.warn {
+  color: var(--amber);
+  border-color: rgba(224, 176, 84, 0.35);
 }
 .badge {
   font-family: var(--font-mono);
@@ -1546,6 +1581,22 @@ code {
   }
   .filters {
     position: static;
+  }
+  .filters-toggle {
+    display: inline-flex;
+  }
+  .filters-toggle[aria-expanded="true"] {
+    color: var(--paper);
+    border-color: #313140;
+  }
+  .filters-more {
+    display: none;
+  }
+  .filters-more[data-open] {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    width: 100%;
   }
   .modal-grid {
     grid-template-columns: 1fr;

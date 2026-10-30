@@ -64,6 +64,44 @@ const daysAgo = (n: number) => new Date(Date.now() - n * 86_400_000);
  */
 const PAGE_SIZE = 50;
 
+/** Reasons that argue against a role. These are the ones worth a chip. */
+const WARN_PREFIXES = [
+  "off-level",
+  "stretch level",
+  "off-stack",
+  "other stack",
+  "asks 3-4",
+  "asks years",
+];
+
+/**
+ * Sort a row's score reasons by whether they deserve space on the row.
+ *
+ * Most reasons are true of nearly every row on the default board ("role match:
+ * software engineer", "target level: ii"), so as chips they were noise that hid
+ * the two that change a decision: which of your stack it uses, and what counts
+ * against it. Everything still reaches the score ring's tooltip.
+ */
+function splitReasons(reasons: string[]) {
+  const warn = reasons.filter((r) => WARN_PREFIXES.some((p) => r.startsWith(p)));
+  const titleStack = reasons.find((r) => r.startsWith("stack: "));
+  const bodyStack = reasons.find((r) => r.startsWith("stack in JD: "));
+  const stack = (titleStack ?? bodyStack)?.replace(/^stack( in JD)?: /, "") ?? null;
+  return { warn, stack };
+}
+
+/** "Budapest, , Hungary" and trailing commas come straight from some boards. */
+function cleanLocation(loc: string): string {
+  return loc.replace(/\s*,(\s*,)+\s*/g, ", ").replace(/^[\s,]+|[\s,]+$/g, "");
+}
+
+/** Colour for the posting age: fresh is the strongest signal on the board. */
+function ageTone(points: number): string {
+  if (points > 0) return "age fresh";
+  if (points <= -14) return "age old";
+  return "age";
+}
+
 /** Rebuild the current query string with `next` applied. */
 function pageHref(sp: Search, next: Partial<Search>): string {
   const params = new URLSearchParams();
@@ -348,6 +386,8 @@ export default async function BoardPage({
             // age in the meta line can never disagree the way they did when a
             // 25-day-old posting still carried "posted <3d".
             const fresh = freshnessFor(j.postedAt);
+            const { warn, stack } = splitReasons(j.reasons);
+            const location = cleanLocation(j.location);
             return (
               <div
                 className={`job ${scoreClass(j.effective)}${
@@ -358,9 +398,11 @@ export default async function BoardPage({
               >
                 <div
                   className="score-wrap"
-                  title={`${j.effective}/100 (fit ${j.score}, freshness ${
-                    fresh.points >= 0 ? "+" : ""
-                  }${fresh.points})`}
+                  title={[
+                    `${j.effective}/100`,
+                    `fit ${j.score}: ${j.reasons.join("; ") || "no signals"}`,
+                    `freshness ${fresh.points >= 0 ? "+" : ""}${fresh.points}: ${fresh.label}`,
+                  ].join("\n")}
                 >
                   <div
                     className="score"
@@ -382,20 +424,30 @@ export default async function BoardPage({
                   </a>
                   <div className="job-meta">
                     <span className="co">{j.company}</span>
-                    {j.location ? ` · ${j.location}` : ""}
+                    {location ? ` · ${location}` : ""}
                     {" · "}
-                    <span title={j.postedAt ? new Date(j.postedAt).toDateString() : ""}>
+                    <span
+                      className={ageTone(fresh.points)}
+                      title={`${fresh.label}${
+                        j.postedAt ? `, ${new Date(j.postedAt).toDateString()}` : ""
+                      }`}
+                    >
                       {ageLabel(j.postedAt)}
                     </span>
+                    <span className="src"> · {j.source}</span>
                   </div>
                   <div className="badges">
                     {isNew && <span className="badge new">new</span>}
-                    <span
-                      className={`badge elig ${j.eligibility}`}
-                      title={j.eligibilityReason}
-                    >
-                      {j.eligibility}
-                    </span>
+                    {/* "eligible" is the default board, so only the exceptions
+                        get a chip. */}
+                    {j.eligibility !== "eligible" && (
+                      <span
+                        className={`badge elig ${j.eligibility}`}
+                        title={j.eligibilityReason}
+                      >
+                        {j.eligibility}
+                      </span>
+                    )}
                     {j.remote && <span className="badge remote">remote</span>}
                     {j.compLabel && (
                       <span className="badge pay" title="Pay band stated in the posting">
@@ -410,15 +462,13 @@ export default async function BoardPage({
                         {formatYoe(j.yoeMin, j.yoeMax)}
                       </span>
                     )}
-                    <span className="badge src">{j.source}</span>
-                    <span
-                      className={`badge ${fresh.points < 0 ? "bad-badge" : ""}`}
-                      title="Computed now, from the posting date"
-                    >
-                      {fresh.label}
-                    </span>
-                    {j.reasons.slice(0, 3).map((r) => (
-                      <span className="badge" key={r}>
+                    {stack && (
+                      <span className="badge fit" title="Your stack, named in the posting">
+                        {stack}
+                      </span>
+                    )}
+                    {warn.map((r) => (
+                      <span className="badge warn" key={r}>
                         {r}
                       </span>
                     ))}

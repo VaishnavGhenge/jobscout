@@ -34,6 +34,10 @@ export function Filters(initial: FilterState) {
   const params = useSearchParams();
   const [isPending, startTransition] = useTransition();
   const [text, setText] = useState(initial.q);
+  // Phones only: the controls stack into six rows and push the first role below
+  // the fold, so they fold behind a toggle. On desktop .filters-more is
+  // display: contents and this does nothing.
+  const [open, setOpen] = useState(false);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const input = useRef<HTMLInputElement>(null);
 
@@ -100,95 +104,105 @@ export function Filters(initial: FilterState) {
         label="Search title or company"
         inputRef={input}
       />
-      <select
-        value={initial.elig}
-        onChange={(e) => apply({ elig: e.target.value })}
-        aria-label="Eligibility"
-        title="Whether you could actually be hired for the role"
+      <button
+        className="btn ghost small filters-toggle"
+        type="button"
+        aria-expanded={open}
+        onClick={() => setOpen((o) => !o)}
       >
-        <option value="open">Can apply (default)</option>
-        <option value="eligible">Eligible only</option>
-        <option value="all">Include blocked</option>
-      </select>
-      <select
-        value={initial.maxAge}
-        onChange={(e) => apply({ maxAge: e.target.value })}
-        aria-label="Maximum posting age"
-        title="Older reqs are usually filled, frozen, or buried"
-      >
-        <option value="">Any age</option>
-        <option value="3">Posted ≤ 3d</option>
-        <option value="7">Posted ≤ 7d</option>
-        <option value="14">Posted ≤ 14d</option>
-        <option value="30">Posted ≤ 30d</option>
-      </select>
-      <select
-        value={initial.source}
-        onChange={(e) => apply({ source: e.target.value })}
-        aria-label="Job board"
-      >
-        <option value="">All sources</option>
-        <option value="greenhouse">Greenhouse</option>
-        <option value="ashby">Ashby</option>
-        <option value="lever">Lever</option>
-        <option value="smartrecruiters">SmartRecruiters</option>
-        <option value="rippling">Rippling</option>
-        <option value="adzuna">Adzuna (aggregated)</option>
-      </select>
-      <select
-        value={initial.maxYoe}
-        onChange={(e) => apply({ maxYoe: e.target.value })}
-        aria-label="Maximum experience asked for"
-        title="Postings that don't state a requirement are always kept"
-      >
-        <option value="">Any experience</option>
-        <option value="2">Asks ≤ 2 yrs</option>
-        <option value="3">Asks ≤ 3 yrs</option>
-        <option value="5">Asks ≤ 5 yrs</option>
-      </select>
-      <select
-        value={initial.minScore}
-        onChange={(e) => apply({ minScore: e.target.value })}
-        aria-label="Minimum fit score"
-      >
-        <option value="0">Any score</option>
-        <option value="50">50+ relevant</option>
-        <option value="62">62+ good fit</option>
-        <option value="76">76+ strong</option>
-      </select>
-      <select
-        value={initial.sort || FILTER_DEFAULTS.sort}
-        onChange={(e) => apply({ sort: e.target.value })}
-        aria-label="Sort order"
-      >
-        <option value="score">Sort: best bet</option>
-        <option value="recent">Sort: newest posting</option>
-        <option value="new">Sort: new to board</option>
-      </select>
-      <label className="check">
-        <input
-          type="checkbox"
-          checked={initial.remote === "1"}
-          onChange={(e) => apply({ remote: e.target.checked ? "1" : "" })}
-        />
-        Remote only
-      </label>
-      <label className="check" title="Hide roles already in your tracker">
-        <input
-          type="checkbox"
-          checked={initial.tracked === "hide"}
-          onChange={(e) => apply({ tracked: e.target.checked ? "hide" : "" })}
-        />
-        Untracked only
-      </label>
-      <label className="check" title="Show roles you've ruled out">
-        <input
-          type="checkbox"
-          checked={initial.dismissed === "show"}
-          onChange={(e) => apply({ dismissed: e.target.checked ? "show" : "" })}
-        />
-        Show dismissed
-      </label>
+        Filters{isActive ? " ·" : ""}
+      </button>
+      <div className="filters-more" data-open={open ? "1" : undefined}>
+        <select
+          value={initial.elig}
+          onChange={(e) => apply({ elig: e.target.value })}
+          aria-label="Eligibility"
+          title="Whether you could actually be hired for the role"
+        >
+          <option value="open">Can apply (default)</option>
+          <option value="eligible">Eligible only</option>
+          <option value="all">Include blocked</option>
+        </select>
+        <select
+          value={initial.maxAge}
+          onChange={(e) => apply({ maxAge: e.target.value })}
+          aria-label="Maximum posting age"
+          title="Older reqs are usually filled, frozen, or buried"
+        >
+          <option value="">Any age</option>
+          <option value="3">Posted ≤ 3d</option>
+          <option value="7">Posted ≤ 7d</option>
+          <option value="14">Posted ≤ 14d</option>
+          <option value="30">Posted ≤ 30d</option>
+        </select>
+        <select
+          value={initial.source}
+          onChange={(e) => apply({ source: e.target.value })}
+          aria-label="Job board"
+        >
+          <option value="">All sources</option>
+          <option value="greenhouse">Greenhouse</option>
+          <option value="ashby">Ashby</option>
+          <option value="lever">Lever</option>
+          <option value="smartrecruiters">SmartRecruiters</option>
+          <option value="rippling">Rippling</option>
+          <option value="adzuna">Adzuna (aggregated)</option>
+        </select>
+        <select
+          value={initial.maxYoe}
+          onChange={(e) => apply({ maxYoe: e.target.value })}
+          aria-label="Maximum experience asked for"
+          title="Postings that don't state a requirement are always kept"
+        >
+          <option value="">Any experience</option>
+          <option value="2">Asks ≤ 2 yrs</option>
+          <option value="3">Asks ≤ 3 yrs</option>
+          <option value="5">Asks ≤ 5 yrs</option>
+        </select>
+        <select
+          value={initial.minScore}
+          onChange={(e) => apply({ minScore: e.target.value })}
+          aria-label="Minimum fit score"
+        >
+          <option value="0">Any score</option>
+          <option value="50">50+ relevant</option>
+          <option value="62">62+ good fit</option>
+          <option value="76">76+ strong</option>
+        </select>
+        <select
+          value={initial.sort || FILTER_DEFAULTS.sort}
+          onChange={(e) => apply({ sort: e.target.value })}
+          aria-label="Sort order"
+        >
+          <option value="score">Sort: best bet</option>
+          <option value="recent">Sort: newest posting</option>
+          <option value="new">Sort: new to board</option>
+        </select>
+        <label className="check">
+          <input
+            type="checkbox"
+            checked={initial.remote === "1"}
+            onChange={(e) => apply({ remote: e.target.checked ? "1" : "" })}
+          />
+          Remote only
+        </label>
+        <label className="check" title="Hide roles already in your tracker">
+          <input
+            type="checkbox"
+            checked={initial.tracked === "hide"}
+            onChange={(e) => apply({ tracked: e.target.checked ? "hide" : "" })}
+          />
+          Untracked only
+        </label>
+        <label className="check" title="Show roles you've ruled out">
+          <input
+            type="checkbox"
+            checked={initial.dismissed === "show"}
+            onChange={(e) => apply({ dismissed: e.target.checked ? "show" : "" })}
+          />
+          Show dismissed
+        </label>
+      </div>
       {isPending && <span className="spinner dim" aria-hidden="true" />}
       {isActive && (
         <button className="btn ghost small" type="button" onClick={clear}>
