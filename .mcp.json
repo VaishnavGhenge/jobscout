@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "apply": {
+      "command": "sh",
+      "args": [
+        "-c",
+        "node_modules/.bin/esbuild tools/apply-mcp/server.ts --bundle --platform=node --format=esm --packages=external --log-level=warning --outfile=tools/apply-mcp/dist/server.mjs && exec node tools/apply-mcp/dist/server.mjs"
+      ]
+    }
+  }
+}

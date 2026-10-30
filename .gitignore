@@ -8,3 +8,10 @@ next-env.d.ts
 .DS_Store
 .vercel
 drizzle
+
+# apply-mcp: personal answers, resumes and build output
+tools/apply-mcp/private/
+tools/apply-mcp/dist/
+tools/apply-mcp/bench-results.json
+.playwright-mcp/
+tools/watch/dist/
