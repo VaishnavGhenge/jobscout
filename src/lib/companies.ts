@@ -125,6 +125,14 @@ export const companies: Company[] = [
   { name: "Redis", ats: "ashby", token: "redis", hiresIn: ["us", "uk", "eu", "india", "canada", "mena"], tags: ["database"] },
   { name: "Imply", ats: "greenhouse", token: "imply", hiresIn: ["us", "india", "apac"], tags: ["database", "data"] },
   { name: "Cribl", ats: "greenhouse", token: "cribl", hiresIn: ["us", "apac", "eu", "india", "uk"], tags: ["observability"] },
+  // Found via LinkedIn on 2026-10-30; hiresIn is india + us until /api/audit
+  // has counted the boards.
+  { name: "Contentstack", ats: "greenhouse", token: "contentstack", hiresIn: ["india", "us"], tags: ["saas", "cms"] },
+  { name: "YipitData", ats: "greenhouse", token: "yipitdata", hiresIn: ["india", "us"], tags: ["data"] },
+  { name: "Sezzle", ats: "greenhouse", token: "sezzle", hiresIn: ["india", "us"], tags: ["fintech"] },
+  { name: "Diagrid", ats: "ashby", token: "diagrid", hiresIn: ["india", "us"], tags: ["infra", "remote"] },
+  { name: "UiPath", ats: "ashby", token: "uipath", hiresIn: ["india", "us"], tags: ["automation", "saas"] },
+  { name: "Cyberhaven", ats: "ashby", token: "cyberhaven", hiresIn: ["india", "us"], tags: ["security"] },
 
   // AI
   { name: "Anthropic", ats: "greenhouse", token: "anthropic", hiresIn: ["india", "us", "uk", "eu", "canada"], tags: ["ai"] },
