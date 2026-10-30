@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef } from "react";
+import { useRef, useState } from "react";
 import type { Application, EligibilityLevel } from "@/db/schema";
 import { CHANNELS, MANUAL_SOURCES, isManualSource } from "@/lib/sources";
 import { saveApplication } from "../actions";
@@ -29,6 +29,11 @@ function dateValue(d: Date | string | null): string {
  *
  * Fields are label-wrapped rather than id-linked: every card renders one of
  * these, so ids would collide across the page.
+ *
+ * Field order follows how you log a form application from memory: who, what,
+ * which door, when, and whether it went anywhere. Where you found the role and
+ * the posting snapshot (eligibility, location) sit under "More details", since
+ * a hand-logged row rarely has anything useful to say there.
  */
 export function ApplicationDialog({
   app,
@@ -43,6 +48,9 @@ export function ApplicationDialog({
 }) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const formRef = useRef<HTMLFormElement>(null);
+  // Backfilling means a run of entries in one sitting. "Save & add another"
+  // keeps the dialog open and says what went in, so you know it took.
+  const [lastSaved, setLastSaved] = useState("");
 
   // A scraped row's (source, externalId) is the key the board dedupes against,
   // so only hand-added rows may change source.
@@ -55,6 +63,7 @@ export function ApplicationDialog({
         type="button"
         className={className}
         onClick={() => {
+          setLastSaved("");
           dialogRef.current?.showModal();
           // Reopening keeps the previous scroll position otherwise.
           formRef.current?.scrollTo(0, 0);
@@ -66,7 +75,7 @@ export function ApplicationDialog({
       <dialog
         className="modal"
         ref={dialogRef}
-        aria-label={app ? "Edit application" : "Add application"}
+        aria-label={app ? "Edit application" : "Log an application"}
         onClick={(e) => {
           if (e.target === dialogRef.current) dialogRef.current?.close();
         }}
@@ -75,52 +84,60 @@ export function ApplicationDialog({
           ref={formRef}
           action={async (fd) => {
             await saveApplication(fd);
-            dialogRef.current?.close();
-            // Adding is repeatable — leave the next one blank.
-            if (!app) formRef.current?.reset();
+            if (app) {
+              dialogRef.current?.close();
+              return;
+            }
+            formRef.current?.reset();
+            if (fd.get("another")) {
+              setLastSaved(String(fd.get("company") ?? ""));
+              formRef.current?.scrollTo(0, 0);
+              formRef.current
+                ?.querySelector<HTMLInputElement>("input[name=company]")
+                ?.focus();
+            } else {
+              dialogRef.current?.close();
+            }
           }}
         >
-          <h2>{app ? "Edit application" : "Add an application"}</h2>
-          <p className="modal-hint">
-            {app
-              ? "Yours to correct — nothing here is overwritten by a refresh."
-              : "For roles you applied to outside the board: an HR form from a LinkedIn post, a referral, a DM."}
-          </p>
+          <h2>{app ? "Edit application" : "Log an application"}</h2>
+          {lastSaved ? (
+            <p className="modal-hint saved" role="status">
+              Logged {lastSaved}. Next one:
+            </p>
+          ) : (
+            <p className="modal-hint">
+              {app
+                ? "Yours to correct. Nothing here is overwritten by a refresh."
+                : "For roles you applied to outside the board: an HR form from a LinkedIn post, a referral, a DM."}
+            </p>
+          )}
 
           {app && <input type="hidden" name="id" value={app.id} />}
 
-          <label className="field">
-            <span>Company</span>
-            <input
-              name="company"
-              required
-              autoComplete="off"
-              placeholder="Vercel"
-              defaultValue={app?.company ?? ""}
-            />
-          </label>
+          <div className="modal-grid">
+            <label className="field">
+              <span>Company</span>
+              <input
+                name="company"
+                required
+                autoComplete="off"
+                placeholder="Razorpay"
+                defaultValue={app?.company ?? ""}
+              />
+            </label>
 
-          <label className="field">
-            <span>Role</span>
-            <input
-              name="title"
-              required
-              autoComplete="off"
-              placeholder="Senior Software Engineer"
-              defaultValue={app?.title ?? ""}
-            />
-          </label>
-
-          <label className="field">
-            <span>Link</span>
-            <input
-              name="url"
-              type="url"
-              autoComplete="off"
-              placeholder="https://…"
-              defaultValue={app?.url ?? ""}
-            />
-          </label>
+            <label className="field">
+              <span>Role</span>
+              <input
+                name="title"
+                required
+                autoComplete="off"
+                placeholder="Backend Engineer"
+                defaultValue={app?.title ?? ""}
+              />
+            </label>
+          </div>
 
           {/* How you applied, which is not where you found it: a Greenhouse
               role can still go in through the recruiter. Editable on every row,
@@ -141,21 +158,13 @@ export function ApplicationDialog({
 
           <div className="modal-grid">
             <label className="field">
-              <span>Found on</span>
-              {sourceEditable ? (
-                <select
-                  name="source"
-                  defaultValue={app?.source ?? MANUAL_SOURCES[0]}
-                >
-                  {MANUAL_SOURCES.map((s) => (
-                    <option key={s} value={s}>
-                      {s}
-                    </option>
-                  ))}
-                </select>
-              ) : (
-                <span className="field-static">{app?.source}</span>
-              )}
+              <span>Applied on</span>
+              <input
+                name="appliedAt"
+                type="date"
+                defaultValue={dateValue(app?.appliedAt ?? null)}
+              />
+              <em>Blank = today, if applied</em>
             </label>
 
             <label className="field">
@@ -171,16 +180,6 @@ export function ApplicationDialog({
           </div>
 
           <div className="modal-grid">
-            <label className="field">
-              <span>Applied on</span>
-              <input
-                name="appliedAt"
-                type="date"
-                defaultValue={dateValue(app?.appliedAt ?? null)}
-              />
-              <em>Blank = today, if applied</em>
-            </label>
-
             {/* The whole reason this field exists: replies arrive on days you
                 don't open the tracker, and "days to reply" is only worth
                 measuring if it's the day they actually wrote. */}
@@ -193,64 +192,105 @@ export function ApplicationDialog({
               />
               <em>{hadResponse ? "Clear = no reply after all" : "Blank = no reply yet"}</em>
             </label>
+
+            <label className="check field-check">
+              <input
+                type="checkbox"
+                name="shortlisted"
+                defaultChecked={Boolean(app?.shortlistedAt)}
+              />
+              <span>
+                Shortlisted
+                <em>Call, interview or assignment, even if it ended in a no</em>
+              </span>
+            </label>
           </div>
 
           {/* Tells the action that an empty date means "clear it", not "leave it". */}
           <input type="hidden" name="hadResponse" value={hadResponse ? "1" : ""} />
 
-          <div className="modal-grid">
-            <label className="field">
-              <span>Eligibility</span>
-              <select
-                name="eligibility"
-                defaultValue={app?.eligibility ?? "eligible"}
-              >
-                {ELIGIBILITY_OPTIONS.map((e) => (
-                  <option key={e} value={e}>
-                    {e}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            <label className="field">
-              <span>Location</span>
-              <input
-                name="location"
-                autoComplete="off"
-                placeholder="Bengaluru · Remote"
-                defaultValue={app?.location ?? ""}
-              />
-            </label>
-          </div>
-
-          <label className="check">
+          <label className="field">
+            <span>Link</span>
             <input
-              type="checkbox"
-              name="remote"
-              defaultChecked={app?.remote ?? false}
+              name="url"
+              type="url"
+              autoComplete="off"
+              placeholder="LinkedIn post or form URL"
+              defaultValue={app?.url ?? ""}
             />
-            Remote
-          </label>
-
-          <label className="check">
-            <input
-              type="checkbox"
-              name="shortlisted"
-              defaultChecked={Boolean(app?.shortlistedAt)}
-            />
-            Shortlisted (call, interview or assignment), even if it ended in a no
           </label>
 
           <label className="field">
             <span>Notes</span>
             <textarea
               name="notes"
-              rows={3}
-              placeholder="Referred by…, recruiter name, salary discussed"
+              rows={2}
+              placeholder="Recruiter name, who referred you, salary discussed"
               defaultValue={app?.notes ?? ""}
             />
           </label>
+
+          {/* Closed by default, but its fields still submit: a closed <details>
+              hides its inputs, it doesn't remove them from the form. */}
+          <details className="more">
+            <summary>More details</summary>
+            <div className="more-body">
+              <div className="modal-grid">
+                <label className="field">
+                  <span>Found on</span>
+                  {sourceEditable ? (
+                    <select
+                      name="source"
+                      defaultValue={app?.source ?? MANUAL_SOURCES[0]}
+                    >
+                      {MANUAL_SOURCES.map((s) => (
+                        <option key={s} value={s}>
+                          {s}
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <span className="field-static">{app?.source}</span>
+                  )}
+                </label>
+
+                <label className="field">
+                  <span>Eligibility</span>
+                  <select
+                    name="eligibility"
+                    defaultValue={app?.eligibility ?? "eligible"}
+                  >
+                    {ELIGIBILITY_OPTIONS.map((e) => (
+                      <option key={e} value={e}>
+                        {e}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+
+              <div className="modal-grid">
+                <label className="field">
+                  <span>Location</span>
+                  <input
+                    name="location"
+                    autoComplete="off"
+                    placeholder="Bengaluru"
+                    defaultValue={app?.location ?? ""}
+                  />
+                </label>
+
+                <label className="check field-check">
+                  <input
+                    type="checkbox"
+                    name="remote"
+                    defaultChecked={app?.remote ?? false}
+                  />
+                  <span>Remote</span>
+                </label>
+              </div>
+            </div>
+          </details>
 
           <div className="modal-actions">
             <button
@@ -258,10 +298,20 @@ export function ApplicationDialog({
               className="btn ghost"
               onClick={() => dialogRef.current?.close()}
             >
-              Cancel
+              {lastSaved ? "Done" : "Cancel"}
             </button>
+            {!app && (
+              <SubmitButton
+                className="btn ghost"
+                name="another"
+                value="1"
+                pendingText={pendingText}
+              >
+                Save &amp; add another
+              </SubmitButton>
+            )}
             <SubmitButton pendingText={pendingText}>
-              {app ? "Save" : "Add to tracker"}
+              {app ? "Save" : "Log it"}
             </SubmitButton>
           </div>
         </form>

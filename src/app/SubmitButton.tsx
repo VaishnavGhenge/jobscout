@@ -12,6 +12,8 @@ export function SubmitButton({
   className = "btn",
   title,
   confirm,
+  name,
+  value,
 }: {
   children: React.ReactNode;
   pendingText?: string;
@@ -19,12 +21,17 @@ export function SubmitButton({
   title?: string;
   /** Ask this before submitting. For actions with no undo — deletes. */
   confirm?: string;
+  /** Sent with the form when this button submits it, for forms with two submits. */
+  name?: string;
+  value?: string;
 }) {
   const { pending } = useFormStatus();
   return (
     <button
       className={className}
       type="submit"
+      name={name}
+      value={value}
       disabled={pending}
       aria-busy={pending}
       title={title}

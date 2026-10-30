@@ -130,6 +130,113 @@ export default async function TrackerPage({
     return qs ? `/tracker?${qs}` : "/tracker";
   }
 
+  function renderCard(a: Application) {
+    const sinceApplied = daysSince(a.appliedAt);
+    const ghosted = isGhosted(a);
+    const replied = hasReplied(a);
+    const gap = daysToReply(a);
+    return (
+      <div className={`card${ghosted ? " ghosted" : ""}`} key={a.id}>
+        {a.url ? (
+          <a
+            className="co"
+            href={a.url}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            {a.company}
+          </a>
+        ) : (
+          <span className="co">{a.company}</span>
+        )}
+        <div className="ti">{a.title}</div>
+
+        <div className="card-tags">
+          {isManualSource(a.source) && (
+            <span className="badge">{a.source}</span>
+          )}
+          {a.channel !== "ats" && (
+            <span className="badge" title="Applied through">
+              via {channelLabel(a.channel)}
+            </span>
+          )}
+          {a.shortlistedAt && (
+            <span className="badge good-badge">shortlisted</span>
+          )}
+          {a.eligibility !== "eligible" && (
+            <span className={`badge elig ${a.eligibility}`}>
+              {a.eligibility}
+            </span>
+          )}
+          {replied ? (
+            <span
+              className="badge good-badge"
+              title="Edit the application to correct the reply date"
+            >
+              {gap === null
+                ? "replied"
+                : gap === 0
+                  ? "replied same day"
+                  : `replied in ${gap}d`}
+            </span>
+          ) : ghosted ? (
+            <span className="badge bad-badge">
+              no reply · {sinceApplied}d
+            </span>
+          ) : sinceApplied !== null ? (
+            <span className="badge">applied {sinceApplied}d ago</span>
+          ) : null}
+        </div>
+
+        {a.notes && <p className="card-note">{a.notes}</p>}
+
+        <StatusSelect
+          id={a.id}
+          status={a.status}
+          label={`Status for ${a.company} — ${a.title}`}
+        />
+
+        <div className="card-row">
+          {a.url && (
+            <a href={a.url} target="_blank" rel="noopener noreferrer">
+              Open ↗
+            </a>
+          )}
+          <ApplicationDialog
+            app={a}
+            label="Edit"
+            className="linkbtn edit"
+          />
+          {a.appliedAt && !replied && (
+            <form action={markReplied}>
+              <input type="hidden" name="id" value={a.id} />
+              <SubmitButton
+                className="linkbtn ok"
+                pendingText="…"
+                title="Stamps a reply today. Heard back earlier? Use Edit to set the real date."
+              >
+                Got reply
+              </SubmitButton>
+            </form>
+          )}
+          <form
+            action={removeApplication}
+            style={{ marginLeft: "auto" }}
+          >
+            <input type="hidden" name="id" value={a.id} />
+            <SubmitButton
+              className="linkbtn"
+              pendingText="Removing…"
+              confirm={`Remove ${a.company} — ${a.title} from the tracker? This can't be undone.`}
+            >
+              Remove
+            </SubmitButton>
+          </form>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <>
       <div className="rowbar">
@@ -144,7 +251,7 @@ export default async function TrackerPage({
           </p>
         </div>
         <div className="rowbar-actions">
-          <ApplicationDialog label="+ Add manually" className="btn" />
+          <ApplicationDialog label="+ Log application" className="btn" />
           <Link className="btn ghost" href="/insights">
             Insights →
           </Link>
@@ -194,7 +301,7 @@ export default async function TrackerPage({
             Nothing tracked yet. Hit <strong>+ Track</strong> on the{" "}
             <strong>Board</strong>, or add one you applied to elsewhere.
           </p>
-          <ApplicationDialog label="+ Add manually" />
+          <ApplicationDialog label="+ Log application" />
         </div>
       ) : (
         <>
@@ -231,118 +338,34 @@ export default async function TrackerPage({
             <div className="board">
               {COLUMNS.map((col) => {
                 const items = byStatus(col.key);
+                const live = items.filter((a) => !isGhosted(a));
+                const ghosts = items.filter(isGhosted);
                 return (
-                  <div className="col" data-s={col.key} key={col.key}>
+                  <div
+                    className="col"
+                    data-s={col.key}
+                    data-empty={items.length === 0 ? "1" : undefined}
+                    key={col.key}
+                  >
                     <h3>
                       {col.label} <span className="n">{items.length}</span>
                     </h3>
                     {items.length === 0 && <p className="col-empty">—</p>}
-                    {items.map((a) => {
-                      const sinceApplied = daysSince(a.appliedAt);
-                      const ghosted = isGhosted(a);
-                      const replied = hasReplied(a);
-                      const gap = daysToReply(a);
-                      return (
-                        <div className={`card${ghosted ? " ghosted" : ""}`} key={a.id}>
-                          {a.url ? (
-                            <a
-                              className="co"
-                              href={a.url}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                            >
-                              {a.company}
-                            </a>
-                          ) : (
-                            <span className="co">{a.company}</span>
-                          )}
-                          <div className="ti">{a.title}</div>
-
-                          <div className="card-tags">
-                            {isManualSource(a.source) && (
-                              <span className="badge">{a.source}</span>
-                            )}
-                            {a.channel !== "ats" && (
-                              <span className="badge" title="Applied through">
-                                via {channelLabel(a.channel)}
-                              </span>
-                            )}
-                            {a.shortlistedAt && (
-                              <span className="badge good-badge">shortlisted</span>
-                            )}
-                            {a.eligibility !== "eligible" && (
-                              <span className={`badge elig ${a.eligibility}`}>
-                                {a.eligibility}
-                              </span>
-                            )}
-                            {replied ? (
-                              <span
-                                className="badge good-badge"
-                                title="Edit the application to correct the reply date"
-                              >
-                                {gap === null
-                                  ? "replied"
-                                  : gap === 0
-                                    ? "replied same day"
-                                    : `replied in ${gap}d`}
-                              </span>
-                            ) : ghosted ? (
-                              <span className="badge bad-badge">
-                                no reply · {sinceApplied}d
-                              </span>
-                            ) : sinceApplied !== null ? (
-                              <span className="badge">applied {sinceApplied}d ago</span>
-                            ) : null}
-                          </div>
-
-                          {a.notes && <p className="card-note">{a.notes}</p>}
-
-                          <StatusSelect
-                            id={a.id}
-                            status={a.status}
-                            label={`Status for ${a.company} — ${a.title}`}
-                          />
-
-                          <div className="card-row">
-                            {a.url && (
-                              <a href={a.url} target="_blank" rel="noopener noreferrer">
-                                Open ↗
-                              </a>
-                            )}
-                            <ApplicationDialog
-                              app={a}
-                              label="Edit"
-                              className="linkbtn edit"
-                            />
-                            {a.appliedAt && !replied && (
-                              <form action={markReplied}>
-                                <input type="hidden" name="id" value={a.id} />
-                                <SubmitButton
-                                  className="linkbtn ok"
-                                  pendingText="…"
-                                  title="Stamps a reply today. Heard back earlier? Use Edit to set the real date."
-                                >
-                                  Got reply
-                                </SubmitButton>
-                              </form>
-                            )}
-                            <form
-                              action={removeApplication}
-                              style={{ marginLeft: "auto" }}
-                            >
-                              <input type="hidden" name="id" value={a.id} />
-                              <SubmitButton
-                                className="linkbtn"
-                                pendingText="Removing…"
-                                confirm={`Remove ${a.company} — ${a.title} from the tracker? This can't be undone.`}
-                              >
-                                Remove
-                              </SubmitButton>
-                            </form>
-                          </div>
-                        </div>
-                      );
-                    })}
+                    {live.map(renderCard)}
+                    {/* Silence past the ghost window is a non-answer, and 19 dimmed
+                        cards you can't act on buried the few you could. Folded
+                        unless you asked for exactly these. */}
+                    {ghosts.length > 0 &&
+                      (reply === "ghosted" ? (
+                        ghosts.map(renderCard)
+                      ) : (
+                        <details className="ghost-fold">
+                          <summary>
+                            {ghosts.length} silent {GHOST_AFTER_DAYS}d+
+                          </summary>
+                          {ghosts.map(renderCard)}
+                        </details>
+                      ))}
                   </div>
                 );
               })}
