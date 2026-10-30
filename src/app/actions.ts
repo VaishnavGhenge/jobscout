@@ -31,6 +31,7 @@ function revalidateAll() {
   revalidatePath("/");
   revalidatePath("/tracker");
   revalidatePath("/insights");
+  revalidatePath("/alerts");
 }
 
 /** Add a job to the tracker (idempotent on source+externalId). */

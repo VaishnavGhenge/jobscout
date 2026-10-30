@@ -315,7 +315,46 @@ export const refreshTasks = pgTable(
   ],
 );
 
+/**
+ * Every role the watcher (tools/watch) pushed to your phone, one row per alert.
+ *
+ * Kept apart from `jobs` because half of these never become job rows: LinkedIn
+ * hits come from searches, not boards, and `jobs` rows are replaced on refresh
+ * anyway. What this table is for is the one number the board can't give you:
+ * how long after posting a role reached you. That's `detectedAt - postedAt`,
+ * and it's the reason the watcher exists.
+ *
+ * Written only when an alert fires, so a quiet watcher never wakes Neon.
+ */
+export const jobAlerts = pgTable(
+  "job_alerts",
+  {
+    id: serial("id").primaryKey(),
+    /** linkedin, or the ATS name for a board posting. */
+    source: text("source").notNull(),
+    /** LinkedIn job id, or the board's posting id. Matches applications.externalId. */
+    externalId: text("external_id").notNull(),
+    company: text("company").notNull(),
+    title: text("title").notNull(),
+    url: text("url").notNull(),
+    location: text("location").notNull().default(""),
+    score: integer("score").notNull(),
+    reasons: jsonb("reasons").$type<string[]>().notNull().default([]),
+    /** LinkedIn's applicant caption when we caught it ("Be among the first 25"). */
+    applicants: text("applicants").notNull().default(""),
+    postedAt: timestamp("posted_at", { withTimezone: true }),
+    detectedAt: timestamp("detected_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("job_alerts_source_external_idx").on(t.source, t.externalId),
+    index("job_alerts_detected_idx").on(t.detectedAt),
+  ],
+);
+
 export type Job = typeof jobs.$inferSelect;
+export type JobAlert = typeof jobAlerts.$inferSelect;
 export type NewJob = typeof jobs.$inferInsert;
 export type Application = typeof applications.$inferSelect;
 export type ApplicationStatus = (typeof applicationStatus.enumValues)[number];

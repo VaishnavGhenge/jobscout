@@ -2,7 +2,8 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { db } from "@/db/client";
 import { channelLabel } from "@/lib/sources";
-import { applications, dismissals, type Application } from "@/db/schema";
+import { applications, dismissals, jobAlerts, type Application } from "@/db/schema";
+import { summarizeCatch, type CatchSummary } from "@/lib/alerts";
 import {
   buildFunnel,
   freshnessBucket,
@@ -46,6 +47,7 @@ export default async function InsightsPage() {
     ]);
   const funnel = buildFunnel(apps);
   const overruled = summarizeDismissals(dismissed);
+  const early = await catchBySource();
 
   if (funnel.applied === 0) {
     return (
@@ -60,6 +62,7 @@ export default async function InsightsPage() {
           shows which kinds of applications get replies and which don&apos;t.
         </div>
         <Overruled rows={overruled} />
+        <HowEarly rows={early} />
       </>
     );
   }
@@ -206,7 +209,72 @@ export default async function InsightsPage() {
       ))}
 
       <Overruled rows={overruled} />
+        <HowEarly rows={early} />
     </>
+  );
+}
+
+/**
+ * How soon after posting the watcher's alerts reached you, per source.
+ *
+ * Empty (not an error) until `pnpm db:push` has created job_alerts.
+ */
+async function catchBySource(): Promise<(CatchSummary & { source: string; alerts: number })[]> {
+  if (!db) return [];
+  try {
+    const rows = await db
+      .select({ source: jobAlerts.source, postedAt: jobAlerts.postedAt, detectedAt: jobAlerts.detectedAt })
+      .from(jobAlerts);
+    const bySource = new Map<string, typeof rows>();
+    for (const r of rows) bySource.set(r.source, [...(bySource.get(r.source) ?? []), r]);
+    return [...bySource.entries()]
+      .map(([source, rs]) => ({ source, alerts: rs.length, ...summarizeCatch(rs) }))
+      .sort((a, b) => b.alerts - a.alerts);
+  } catch {
+    return [];
+  }
+}
+
+function HowEarly({ rows }: { rows: Awaited<ReturnType<typeof catchBySource>> }) {
+  return (
+    <section className="slice">
+      <h2>How early you see roles</h2>
+      <p className="hint">
+        Time from a role going up to the watcher alerting you. Inside the first
+        hour you are usually among the first 25 applicants; by the end of the day
+        it is often hundreds.
+      </p>
+      {rows.length === 0 ? (
+        <div className="empty">
+          No alerts recorded yet. They show up here once the watcher has pushed
+          one, see <Link href="/alerts">Alerts</Link>.
+        </div>
+      ) : (
+        <table className="grid">
+          <thead>
+            <tr>
+              <th>Source</th>
+              <th className="num">Alerts</th>
+              <th className="num">Median catch</th>
+              <th className="num">Within an hour</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.source}>
+                <td>{r.source}</td>
+                <td className="num">{r.alerts}</td>
+                <td className="num">{r.medianMinutes === null ? "–" : `${r.medianMinutes} min`}</td>
+                <td className="num">
+                  {r.withinHour === null ? "–" : `${Math.round(r.withinHour * 100)}%`}
+                  {r.timed < r.alerts && <span className="dim"> of {r.timed} timed</span>}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </section>
   );
 }
 

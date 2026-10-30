@@ -21,6 +21,8 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { companies, type Company } from "@/lib/companies";
 import { connectors } from "@/lib/connectors";
+import { db } from "@/db/client";
+import { jobAlerts } from "@/db/schema";
 import { refreshCompany } from "@/lib/refresh";
 import { isEngineeringRole, scoreJob } from "@/lib/scoring";
 import { guestDetail, pool, score as scoreLinkedIn, searchLinkedIn, type SearchOptions } from "../lib/linkedin";
@@ -30,6 +32,8 @@ const DIR = join(homedir(), ".jobscout");
 const CONFIG = join(DIR, "watch.json");
 const STATE = join(DIR, "watch-state.json");
 const ALERTS = join(DIR, "alerts.jsonl");
+/** Last tick's summary, read by the site's /alerts page to show the watcher is alive. */
+const STATUS = join(DIR, "watch-status.json");
 
 /** Rippling has no ETags and costs a request per posting, so it ticks hourly. */
 const MIN_INTERVAL_MIN: Partial<Record<Company["ats"], number>> = { rippling: 60 };
@@ -52,6 +56,7 @@ interface State {
 
 interface Hit {
   source: string;
+  externalId: string;
   company: string;
   title: string;
   location: string;
@@ -133,6 +138,24 @@ async function alert(cfg: Config, h: Hit): Promise<void> {
     }) + "\n",
   );
   await Promise.all([
+    h.source === "test" || !db
+      ? Promise.resolve()
+      : db
+          .insert(jobAlerts)
+          .values({
+            source: h.source,
+            externalId: h.externalId,
+            company: h.company,
+            title: h.title,
+            url: h.url,
+            location: h.location,
+            score: h.score,
+            reasons: h.reasons,
+            applicants: h.extra ?? "",
+            postedAt: h.postedAt,
+          })
+          .onConflictDoNothing()
+          .catch((e: Error) => console.error(`job_alerts insert failed: ${e.message.slice(0, 120)}`)),
     macNotify(title, body),
     cfg.ntfyTopic ? phoneNotify(cfg.ntfyTopic, { title, body, url: h.url, score: h.score }) : Promise.resolve(),
   ]);
@@ -172,6 +195,7 @@ async function pollAts(state: State, cfg: Config): Promise<{ hits: Hit[]; change
         if (s.eligibility === "blocked" || s.score < cfg.threshold) continue;
         hits.push({
           source: c.ats,
+          externalId: p.externalId,
           company: c.name,
           title: p.title,
           location: p.location,
@@ -201,6 +225,7 @@ async function pollLinkedIn(state: State, cfg: Config): Promise<{ hits: Hit[]; s
     if (s.eligibility === "blocked" || s.score < cfg.threshold) return;
     hits.push({
       source: "linkedin",
+      externalId: c.jobId,
       company: c.company,
       title: c.title,
       location: c.location,
@@ -223,6 +248,7 @@ async function main() {
   if (args.has("--test")) {
     await alert(cfg, {
       source: "test",
+      externalId: "test",
       company: "jobscout",
       title: "Test alert",
       location: "Pune",
@@ -261,6 +287,22 @@ async function main() {
     db = ` db=${ats.changed.length - failed.length}/${ats.changed.length}${failed.length ? ` (${failed.join("; ")})` : ""}`;
   }
 
+  writeFileSync(
+    STATUS,
+    JSON.stringify({
+      at: new Date().toISOString(),
+      ms: Date.now() - t0,
+      boards: companies.length,
+      polled: ats.polled,
+      changed: ats.changed.map((c) => c.name),
+      searches: (searches as SearchOptions[]).length,
+      linkedinSeen: li.seen,
+      linkedinNew: li.fresh,
+      alerts: sent,
+      threshold: cfg.threshold,
+      errors: ats.errors,
+    }),
+  );
   console.log(
     `${new Date().toISOString()} ats=${ats.polled} changed=${ats.changed.length} li=${li.seen}/${li.fresh}new alerts=${sent}${db} ${Date.now() - t0}ms` +
       (ats.errors.length ? ` errors: ${ats.errors.slice(0, 3).join(" / ")}` : ""),
