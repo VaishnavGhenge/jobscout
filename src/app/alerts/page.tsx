@@ -6,6 +6,7 @@ import {
   WATCH_STALE_MINUTES,
   catchLabel,
   catchMinutes,
+  readRemoteWatch,
   readWatchStatus,
   summarizeCatch,
 } from "@/lib/alerts";
@@ -19,8 +20,14 @@ export const dynamic = "force-dynamic";
 const WINDOW_DAYS = 14;
 
 export default async function AlertsPage() {
-  const status = readWatchStatus();
-  const staleMin = status ? (Date.now() - new Date(status.at).getTime()) / 60000 : null;
+  const local = readWatchStatus();
+  const localFresh = local && Date.now() - new Date(local.at).getTime() < WATCH_STALE_MINUTES * 60000;
+  // Once the watcher runs in GitHub Actions the local file goes stale, and the
+  // last workflow run is the heartbeat instead.
+  const remote = localFresh ? null : await readRemoteWatch();
+  const status = localFresh || !remote ? local : null;
+  const lastRun = status?.at ?? remote?.at ?? null;
+  const staleMin = lastRun ? (Date.now() - new Date(lastRun).getTime()) / 60000 : null;
 
   let alerts: JobAlert[] = [];
   let tracked = new Set<string>();
@@ -88,19 +95,32 @@ export default async function AlertsPage() {
               watcher ran {timeAgo(status.at)} · {status.polled}/{status.boards} boards ·{" "}
               {status.searches} searches
             </>
+          ) : remote ? (
+            <a href={remote.url} target="_blank" rel="noopener noreferrer">
+              watcher ran {timeAgo(remote.at)} on GitHub Actions
+              {remote.conclusion && remote.conclusion !== "success" ? ` (${remote.conclusion})` : ""}
+            </a>
           ) : (
             "watcher has not run"
           )}
         </span>
       </div>
 
-      {!status || (staleMin !== null && staleMin > WATCH_STALE_MINUTES) ? (
+      {!lastRun || (staleMin !== null && staleMin > WATCH_STALE_MINUTES) ? (
         <div className="empty">
-          {status
-            ? `The watcher last ran ${timeAgo(status.at)}. It only runs while the Mac is awake; if it's been awake, check the agent with launchctl print gui/$(id -u)/com.jobscout.watch.`
-            : "No watcher status yet. Install it with sh tools/watch/install.sh."}
+          {lastRun
+            ? `The watcher last ran ${timeAgo(lastRun)}. Check the "Watch for new postings" workflow on GitHub Actions; schedules are disabled after 60 days without a commit.`
+            : "No watcher runs yet. It runs from .github/workflows/watch.yml once that's on GitHub."}
         </div>
-      ) : status.errors.length ? (
+      ) : remote?.conclusion === "failure" ? (
+        <p className="micro">
+          The last watcher run failed.{" "}
+          <a href={remote.url} target="_blank" rel="noopener noreferrer">
+            See the run
+          </a>
+          .
+        </p>
+      ) : status?.errors.length ? (
         <p className="micro">
           {status.errors.length} board{status.errors.length > 1 ? "s" : ""} failing:{" "}
           {status.errors.join(" · ")}

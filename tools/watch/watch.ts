@@ -70,6 +70,11 @@ interface Hit {
 
 const args = new Set(process.argv.slice(2));
 const DRY = args.has("--dry");
+/**
+ * Running in GitHub Actions. The repo is public, so its logs are too: print
+ * counts, never which roles were alerted on.
+ */
+const CI = Boolean(process.env.CI);
 
 function load<T>(path: string, fallback: T): T {
   try {
@@ -123,7 +128,7 @@ async function phoneNotify(topic: string, h: { title: string; body: string; url:
 async function alert(cfg: Config, h: Hit): Promise<void> {
   const title = `${h.score} · ${h.title} · ${h.company}`;
   const body = [ago(h.postedAt), h.location, h.extra, h.reasons.slice(0, 2).join("; ")].filter(Boolean).join(" · ");
-  console.log(`ALERT ${title} | ${body} | ${h.url}`);
+  if (!CI) console.log(`ALERT ${title} | ${body} | ${h.url}`);
   if (DRY) return;
   if (h.source !== "test") appendFileSync(
     ALERTS,
@@ -157,7 +162,7 @@ async function alert(cfg: Config, h: Hit): Promise<void> {
           })
           .onConflictDoNothing()
           .catch((e: Error) => console.error(`job_alerts insert failed: ${e.message.slice(0, 120)}`)),
-    macNotify(title, body),
+    process.platform === "darwin" ? macNotify(title, body) : Promise.resolve(),
     cfg.ntfyTopic ? phoneNotify(cfg.ntfyTopic, { title, body, url: h.url, score: h.score }) : Promise.resolve(),
   ]);
 }
@@ -247,6 +252,9 @@ async function pollLinkedIn(state: State, cfg: Config): Promise<{ hits: Hit[]; s
 async function main() {
   mkdirSync(DIR, { recursive: true });
   const cfg: Config = { threshold: 70, maxAgeHours: DEFAULT_MAX_AGE_H, ...load<Partial<Config>>(CONFIG, {}) };
+  // In Actions there's no ~/.jobscout/watch.json; settings come from secrets/vars.
+  if (process.env.NTFY_TOPIC) cfg.ntfyTopic = process.env.NTFY_TOPIC;
+  if (process.env.WATCH_THRESHOLD) cfg.threshold = Number(process.env.WATCH_THRESHOLD);
 
   if (args.has("--test")) {
     await alert(cfg, {
@@ -263,6 +271,10 @@ async function main() {
     return;
   }
 
+  // With no state there's nothing to diff against, and every fresh LinkedIn
+  // hit would alert at once, including ones another machine already sent. The
+  // first run on a new machine only records what's out there.
+  const seeding = !existsSync(STATE);
   const state = load<State>(STATE, { ats: {}, linkedin: {}, alerted: {} });
   const t0 = Date.now();
   const [ats, li] = await Promise.all([pollAts(state, cfg), pollLinkedIn(state, cfg)]);
@@ -277,6 +289,7 @@ async function main() {
     const key = `${norm(h.company)}|${norm(h.title)}`;
     if (state.alerted[key]) continue;
     state.alerted[key] = now;
+    if (seeding) continue;
     await alert(cfg, h);
     sent++;
   }
@@ -307,7 +320,7 @@ async function main() {
     }),
   );
   console.log(
-    `${new Date().toISOString()} ats=${ats.polled} changed=${ats.changed.length} li=${li.seen}/${li.fresh}new alerts=${sent}${db} ${Date.now() - t0}ms` +
+    `${new Date().toISOString()}${seeding ? " seeded" : ""} ats=${ats.polled} changed=${ats.changed.length} li=${li.seen}/${li.fresh}new alerts=${sent}${db} ${Date.now() - t0}ms` +
       (ats.errors.length ? ` errors: ${ats.errors.slice(0, 3).join(" / ")}` : ""),
   );
 }

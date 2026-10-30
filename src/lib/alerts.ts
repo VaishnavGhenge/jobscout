@@ -76,3 +76,34 @@ export function summarizeCatch(alerts: Pick<JobAlert, "postedAt" | "detectedAt">
     withinHour: mins.filter((m) => m <= 60).length / mins.length,
   };
 }
+
+/** The workflow that runs the watcher once it's in the cloud (.github/workflows/watch.yml). */
+const WATCH_WORKFLOW_RUNS =
+  "https://api.github.com/repos/VaishnavGhenge/jobscout/actions/workflows/watch.yml/runs?per_page=1";
+
+export interface RemoteWatch {
+  at: string;
+  /** "success", "failure", or null while a run is in progress. */
+  conclusion: string | null;
+  url: string;
+}
+
+/**
+ * The latest GitHub Actions run of the watcher. The cloud runner can't write
+ * the local status file, so this is how the page knows it's alive. Public repo,
+ * so no token; cached for a minute to stay far under the 60/hour anonymous limit.
+ */
+export async function readRemoteWatch(): Promise<RemoteWatch | null> {
+  try {
+    const r = await fetch(WATCH_WORKFLOW_RUNS, {
+      headers: { accept: "application/vnd.github+json" },
+      next: { revalidate: 60 },
+      signal: AbortSignal.timeout(3000),
+    });
+    if (!r.ok) return null;
+    const run = (await r.json()).workflow_runs?.[0];
+    return run ? { at: run.updated_at, conclusion: run.conclusion, url: run.html_url } : null;
+  } catch {
+    return null;
+  }
+}
