@@ -37,7 +37,7 @@ export const profile = {
    * has to be honest: raise it and the whole board's level judgement moves with
    * it.
    */
-  yearsExperience: 2,
+  yearsExperience: 3,
 
   /**
    * Where you'd actually go. Separate from eligibility: a Noida role is one you
@@ -342,13 +342,16 @@ export const profile = {
    * you decide you don't want body-shop roles, but that's a preference, not a
    * data-quality fix.
    *
-   * Matched case-insensitively against the whole company name.
+   * Matched case-insensitively against the whole company name, and against the
+   * author of a LinkedIn post.
    */
   repostBlocklist: [
     /** Aggregator that republishes remote roles; the real employer is hidden. */
     "jobgether",
     /** Recruiting marketplace posting on behalf of unnamed clients. */
     "weekday ai",
+    /** Posts US-remote listings on LinkedIn with no role or employer named. */
+    "freelanly",
   ],
 
   /**

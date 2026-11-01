@@ -33,7 +33,7 @@ const CITY_ALIASES: Record<string, string> = {
 };
 /** Places that are clearly not India. Anything else unrecognised counts as unknown and is kept. */
 const ABROAD =
-  /\b(jakarta|indonesia|lahore|karachi|islamabad|pakistan|dhaka|bangladesh|uae|dubai|abu dhabi|saudi|riyadh|qatar|doha|singapore|malaysia|philippines|manila|nigeria|lagos|kenya|nairobi|usa|united states|canada|toronto|uk|united kingdom|london|germany|berlin|netherlands|amsterdam|australia|sydney|vietnam|egypt|cairo|nepal|sri lanka|jersey|texas|california|new york)\b/i;
+  /\b(jakarta|indonesia|lahore|karachi|islamabad|pakistan|dhaka|bangladesh|uae|dubai|abu dhabi|saudi|riyadh|qatar|doha|singapore|malaysia|philippines|manila|nigeria|lagos|kenya|nairobi|usa|united states|canada|toronto|uk|united kingdom|england|scotland|wales|ireland|dublin|london|manchester|birmingham|sussex|surrey|kent|germany|berlin|netherlands|amsterdam|australia|sydney|vietnam|egypt|cairo|giza|alexandria|smart village|nepal|sri lanka|jersey|texas|california|new york)\b/i;
 const US = /\b(us|usa|united states|u\.s\.?|americas?|north america)\b/i;
 const ANYWHERE = /\b(anywhere|worldwide|global(ly)?|any location|fully distributed)\b/i;
 const REMOTE = /\bremote\b|work from home|\bwfh\b|fully distributed/i;
@@ -63,8 +63,10 @@ export function locationVerdict(location: string, text = ""): LocationVerdict {
   if (has(loc, INDIA)) {
     return { ok: false, label: loc, why: `on-site in ${loc}, not one of your cities` };
   }
-  // Neither India nor anywhere recognisably abroad ("Multiple locations"): keep it.
-  if (!ABROAD.test(loc)) return { ok: true, label: loc, why: null };
+  // A place the list doesn't know ("Smart Village", "Sussex"): if the post body
+  // names a country abroad and never India, it's abroad. Otherwise
+  // ("Multiple locations") keep it.
+  if (!ABROAD.test(loc) && !(ABROAD.test(text) && !has(text, INDIA))) return { ok: true, label: loc, why: null };
   // Somewhere outside India.
   if (pref.abroadIfSponsored && SPONSOR.test(text) && !NO_SPONSOR.test(text)) {
     return { ok: true, label: `${loc}, sponsored`, why: null };

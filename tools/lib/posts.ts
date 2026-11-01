@@ -45,7 +45,7 @@ export interface TriagedPost {
 }
 
 const OPEN_TO_WORK =
-  /#opentowork|open to (new )?(work|opportunities|roles)|i'?m (actively )?(looking|seeking|available)|available to (start|join) immediately|seeking (entry[- ]level |new )?(career )?opportunit/i;
+  /#opentowork|open to (new )?(work|opportunities|roles)|i['’]?m (actively )?(looking|seeking|available)|my next (challenge|role|opportunity)|(officially )?on the (job )?market|available to (start|join) immediately|seeking (entry[- ]level |new )?(career )?opportunit/i;
 const HIRING =
   /we'?re hiring|we are hiring|#hiring|\bhiring\b|is hiring|looking for (a|an|talented|skilled|experienced)|job opening|openings? for|urgent(ly)? (hiring|requirement)|walk-?in/i;
 const INTERN = /\bintern(ship)?s?\b|\bunpaid\b|\bstipend\b|\bfreshers? only\b/i;
@@ -158,8 +158,9 @@ export function triagePost(p: RawPost, o: TriageOptions = {}): TriagedPost {
   let drop: string | null = null;
   const where = locationVerdict(location, body);
   const indiaish = INDIA_PLACES.some((c) => new RegExp(`\\b${c}\\b`, "i").test(location)) || /remote/i.test(location);
-  if (OPEN_TO_WORK.test(body) && !/we'?re hiring|we are hiring/i.test(body)) drop = "open-to-work post, not a role";
+  if (OPEN_TO_WORK.test(body) && !/we['’]?re hiring|we are hiring/i.test(body)) drop = "open-to-work post, not a role";
   else if (!HIRING.test(body)) drop = "not a hiring post";
+  else if (profile.repostBlocklist.some((n) => `${author} ${company}`.toLowerCase().includes(n))) drop = "reposter, employer hidden";
   else if (role && !isEngineeringRole(role)) drop = `not an engineering role (${role.slice(0, 40)})`;
   else if (!where.ok) drop = where.why;
   else if (/\b(indonesian|pakistani|uae nationals?|us citizens?) (candidates )?only\b/i.test(body)) drop = "restricted to another country's candidates";
