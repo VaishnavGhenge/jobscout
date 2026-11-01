@@ -19,7 +19,8 @@
  *   - Common screening questions are answered from applicant.json, so a form
  *     read returns only the questions it couldn't answer.
  *
- * Nothing here submits anything unless form_submit is called with confirm.
+ * Nothing here submits anything unless form_submit or email_send is called with
+ * confirm. Cold emails are composed as Gmail drafts for you to send.
  *
  * Chrome: attaches over CDP to 127.0.0.1:$APPLY_CDP_PORT (default 9222), and
  * launches Chrome with a dedicated profile if nothing is listening. Since Chrome
@@ -40,6 +41,10 @@ import {
   UA, decodeEntities, guestDetail, pool, score, searchLinkedIn, sleep,
 } from "../lib/linkedin";
 import { dedupePosts, formatPost, triagePost, type RawPost } from "../lib/posts";
+import {
+  DAILY_CAP, bingSearch, boardFit, discoverFit, formatFit, loadOutbox, outboxCheck, resolveDomain, saveOutbox, webContacts,
+  type Contact, type Draft, type Searcher, type WebHit,
+} from "./outreach";
 
 const PORT = Number(process.env.APPLY_CDP_PORT ?? 9222);
 const PROFILE =
@@ -59,6 +64,8 @@ let browser: Browser | null = null;
 let ctx: BrowserContext | null = null;
 let dataTab: Page | null = null;
 let workTab: Page | null = null;
+/** Gmail compose lives in its own tab so a search in the work tab can't discard an unsent draft. */
+let mailTab: Page | null = null;
 
 async function cdpUp(): Promise<boolean> {
   try {
@@ -92,6 +99,7 @@ async function context(): Promise<BrowserContext> {
   ctx = browser.contexts()[0] ?? (await browser.newContext());
   dataTab = null;
   workTab = null;
+  mailTab = null;
   return ctx;
 }
 
@@ -112,9 +120,9 @@ async function targetId(p: Page): Promise<string> {
   }
 }
 
-async function tab(kind: "data" | "work"): Promise<Page> {
+async function tab(kind: "data" | "work" | "mail"): Promise<Page> {
   const c = await context();
-  const cur = kind === "data" ? dataTab : workTab;
+  const cur = kind === "data" ? dataTab : kind === "mail" ? mailTab : workTab;
   if (cur && !cur.isClosed()) return cur;
   let saved: Record<string, string> = {};
   try {
@@ -135,6 +143,7 @@ async function tab(kind: "data" | "work"): Promise<Page> {
     writeFileSync(TABS_FILE, JSON.stringify(saved));
   }
   if (kind === "data") dataTab = p;
+  else if (kind === "mail") mailTab = p;
   else workTab = p;
   return p;
 }
@@ -938,6 +947,498 @@ server.registerTool(
       links: Array.from(new Set(Array.from(document.querySelectorAll("a")).map((a) => a.href).filter((h) => /apply|forms\.gle|docs\.google\.com\/forms|careers|jobs\//i.test(h)))).slice(0, 15),
     }));
     return text(`${r.title} | ${p.url()}\n${clip(r.text, maxChars)}${r.links.length ? `\nlinks:\n${r.links.join("\n")}` : ""}`);
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Outreach: companies worth a cold email, public contacts, Gmail drafts
+
+/**
+ * LinkedIn people search in the work tab. Returns names and headlines only:
+ * LinkedIn shows email addresses to 1st-degree connections alone, so these are
+ * people to find a public address for, or to message.
+ */
+async function linkedinPeople(company: string, titles: string[]): Promise<Contact[] | "login"> {
+  const p = await tab("work");
+  const out: Contact[] = [];
+  for (const t of titles) {
+    await p.goto(`https://www.linkedin.com/search/results/people/?keywords=${encodeURIComponent(`${company} ${t}`)}`, { waitUntil: "domcontentloaded" });
+    if (/authwall|login/.test(p.url())) return "login";
+    // Results render inside an iframe on current LinkedIn, so wait on and read every frame.
+    for (let i = 0; i < 40; i++) {
+      const n = await Promise.all(p.frames().map((f) => f.locator("li a[href*='/in/']").count().catch(() => 0)));
+      if (n.some((x) => x > 0)) break;
+      await sleep(300);
+    }
+    const read = () =>
+      Array.from(document.querySelectorAll("li")).flatMap((li) => {
+        const a = li.querySelector("a[href*='/in/']") as HTMLAnchorElement | null;
+        if (!a) return [];
+        const lines = (li as HTMLElement).innerText.split("\n").map((x) => x.trim())
+          .filter((x) => x && !/^(•\s*)?(1st|2nd|3rd\+?)$|^View .* profile|^(Connect|Message|Follow|Status is)/.test(x));
+        return [{ url: a.href.split("?")[0], name: lines[0] ?? "", headline: lines[1] ?? "" }];
+      });
+    const rows = (await Promise.all(p.frames().map((f) => f.evaluate(read).catch(() => [])))).flat();
+    const co = company.toLowerCase();
+    for (const r of rows) {
+      if (!r.name || !r.headline.toLowerCase().includes(co) || out.some((o) => o.source === r.url)) continue;
+      out.push({ email: null, name: r.name.replace(/\s*Verified.*$/i, ""), role: r.headline.slice(0, 90), kind: "linkedin", source: r.url });
+    }
+    await sleep(1200);
+  }
+  return out;
+}
+
+/**
+ * Google, in the work tab of your real Chrome. Scripted HTTP gets a bot check
+ * from DuckDuckGo and a degraded index from Bing; a signed-in browser gets the
+ * real results. Falls back to Bing when Google shows its "unusual traffic" page.
+ */
+const webSearch: Searcher = async (q, n = 10) => {
+  const p = await tab("work");
+  await p.goto(`https://www.google.com/search?q=${encodeURIComponent(q)}&num=${Math.max(n, 10)}&hl=en`, { waitUntil: "domcontentloaded" });
+  if (/\/sorry\//.test(p.url())) return bingSearch(q, n);
+  await p.waitForSelector("#search a h3, #botstuff", { timeout: 10000 }).catch(() => {});
+  const hits: WebHit[] = await p.evaluate(() =>
+    Array.from(document.querySelectorAll("#search a:has(h3)")).map((a) => {
+      const block = a.closest("[data-hveid], .g") as HTMLElement | null;
+      const title = (a.querySelector("h3") as HTMLElement).innerText;
+      const snippet = (block?.innerText ?? "").replace(title, "").replace(/\s+/g, " ").trim().slice(0, 400);
+      return { title, url: (a as HTMLAnchorElement).href, snippet };
+    }),
+  );
+  const seen = new Set<string>();
+  return hits.filter((h) => /^https?:/.test(h.url) && !/google\.[a-z.]+\//.test(h.url) && !seen.has(h.url) && seen.add(h.url)).slice(0, n);
+};
+
+/**
+ * People at a company from Google's index of LinkedIn profiles. No LinkedIn page
+ * loads, and Google's title line is a clean "Name - Role - Company". The snippet
+ * can describe a past job, so these are leads to check, not verified staff.
+ */
+async function googlePeople(company: string): Promise<Contact[]> {
+  const hits = await webSearch(`site:linkedin.com/in "${company}" recruiter OR "talent acquisition" OR "engineering manager" India`, 10).catch(() => []);
+  const co = company.toLowerCase();
+  return hits
+    .filter((h) => /linkedin\.com\/in\//.test(h.url) && `${h.title} ${h.snippet}`.toLowerCase().includes(co))
+    .map((h) => {
+      const [name, ...rest] = h.title.replace(/\s*[|·].*LinkedIn.*$/i, "").split(/\s+-\s+/);
+      return { email: null, name: name.trim(), role: rest.join(" - ").slice(0, 90) || h.snippet.slice(0, 90), kind: "linkedin" as const, source: h.url.split("?")[0] };
+    });
+}
+
+server.registerTool(
+  "companies_fit",
+  {
+    description:
+      "Rank companies worth a cold email: stack overlap with your profile, roles at your level in your cities, hiring momentum, volume. Board companies come from the jobscout DB (already-applied ones excluded); discover=true adds companies found on LinkedIn's job search that the board doesn't track. kind: 'open role' = something fits now, 'growing' = hiring your stack but nothing at your level yet (a good cold-email target), 'discovered' = outside the board.",
+    inputSchema: {
+      days: z.number().int().min(7).max(90).default(30),
+      limit: z.number().int().min(1).max(40).default(20),
+      discover: z.boolean().default(true),
+      roles: z.array(z.string()).max(4).default(["python developer", "backend developer", "full stack developer"]),
+    },
+  },
+  async ({ days, limit, discover, roles }) => {
+    const board = await boardFit(days).catch((e: Error) => e);
+    const known = new Set(board instanceof Error ? [] : board.map((b) => b.company.toLowerCase()));
+    const found = discover ? await discoverFit(roles, Math.min(days, 30), known) : [];
+    const all = [...(board instanceof Error ? [] : board), ...found].sort((a, b) => b.fit - a.fit).slice(0, limit);
+    const emailed = new Set(loadOutbox().filter((d) => d.status === "composed" || d.status === "sent").map((d) => d.company.toLowerCase()));
+    const lines = all.map((f, i) => formatFit(f, i + 1, days) + (emailed.has(f.company.toLowerCase()) ? "\n   (already emailed)" : ""));
+    const head = `${board instanceof Error ? `board unavailable: ${board.message}` : `${board.length} board companies`}, ${found.length} discovered · fit | company | kind | roles | trend | stack | cities`;
+    return text(`${head}\n${lines.join("\n")}`);
+  },
+);
+
+server.registerTool(
+  "web_search",
+  {
+    description:
+      "Search the open web (Google in your real Chrome, Bing as fallback) and return title, URL and snippet per hit. Use for finding companies (e.g. 'site:wellfound.com python startup pune'), a company's domain, team pages or public hiring contacts. Keep it to a handful of queries per task; bursts get throttled.",
+    inputSchema: { query: z.string(), n: z.number().int().min(1).max(20).default(8) },
+  },
+  async ({ query, n }) => {
+    const hits = await webSearch(query, n);
+    if (!hits.length) return text("No results (or throttled; wait a minute).");
+    return text(hits.map((h, i) => `${i + 1}. ${h.title}\n   ${h.url}\n   ${h.snippet.slice(0, 200)}`).join("\n"));
+  },
+);
+
+server.registerTool(
+  "contacts_find",
+  {
+    description:
+      "Public hiring contacts at a company, each with the page it was found on: emails from the company's own careers/contact/team pages, its GitHub org and web search hits on '@domain'; plus engineering managers and recruiters from LinkedIn people search and Google's index of LinkedIn profiles (names and profiles, no emails; check they still work there). Never guesses addresses. Give domain when known; otherwise it's resolved by web search.",
+    inputSchema: {
+      company: z.string(),
+      domain: z.string().optional().describe("e.g. celigo.com"),
+      linkedin: z.boolean().default(true).describe("also search LinkedIn people (uses the logged-in browser, two page loads)"),
+    },
+  },
+  async ({ company, domain, linkedin }) => {
+    const d = (domain ?? (await resolveDomain(company, webSearch)))?.replace(/^https?:\/\//, "").replace(/^www\./, "").replace(/\/.*$/, "");
+    if (!d) return text(`Couldn't find a website for ${company}. Pass domain.`);
+    // Sequential: Google and LinkedIn both drive the work tab.
+    const web = await webContacts(d, company, webSearch);
+    const people = linkedin ? await linkedinPeople(company, ["engineering manager", "talent acquisition"]).catch(() => [] as Contact[]) : [];
+    const viaGoogle = await googlePeople(company);
+    const slug = (u: string) => u.match(/\/in\/([^/?#]+)/)?.[1] ?? u;
+    const ppl = [...(people === "login" ? [] : people), ...viaGoogle].filter(
+      (c, i, all) => all.findIndex((o) => slug(o.source) === slug(c.source)) === i,
+    );
+    const lines = [...web.contacts, ...ppl].map(
+      (c) => `${c.kind} | ${c.email ?? "-"} | ${c.name ?? ""}${c.role ? ` (${c.role})` : ""} | ${c.source}`,
+    );
+    return text(
+      [
+        `${company} · ${d} · ${web.contacts.length} public emails from ${web.checked.length} pages + web, ${ppl.length} LinkedIn people${people === "login" ? " (LinkedIn logged out)" : ""}`,
+        "kind | email | name (role) | source",
+        ...(lines.length ? lines : ["nothing public found"]),
+      ].join("\n"),
+    );
+  },
+);
+
+server.registerTool(
+  "email_draft",
+  {
+    description:
+      `Save a cold email to the local outbox (~/.jobscout/outreach). Write the subject and body yourself: short, specific to the company, no placeholders. Returns an id and any warnings (already emailed this company in 45 days, daily cap ${DAILY_CAP}, too long). Nothing leaves the machine.`,
+    inputSchema: {
+      company: z.string(),
+      to: z.string().email(),
+      toName: z.string().optional(),
+      subject: z.string().min(3),
+      body: z.string().min(20),
+      resume: z.string().optional().describe("resume key from applicant.json (backend, fullstack) or a path; default from applicant.json"),
+      source: z.string().optional().describe("where the address was found"),
+    },
+  },
+  async (a) => {
+    const all = loadOutbox();
+    const domain = a.to.split("@")[1].toLowerCase();
+    const warn = outboxCheck(a.to.toLowerCase(), domain, a.body, all);
+    const r = resumePath(a.resume, loadBank());
+    const d: Draft = {
+      id: `e${all.length + 1}`,
+      company: a.company,
+      domain,
+      to: a.to.toLowerCase(),
+      toName: a.toName ?? null,
+      subject: a.subject,
+      body: a.body,
+      resume: r,
+      status: "draft",
+      createdAt: new Date().toISOString(),
+      source: a.source,
+    };
+    saveOutbox([...all, d]);
+    return text(
+      `${d.id} saved · to ${d.to} · resume ${r ? basename(r) : "NONE (not found)"}${warn.length ? `\nWARN: ${warn.join("; ")}` : ""}\nSubject: ${d.subject}\n\n${d.body}`,
+    );
+  },
+);
+
+server.registerTool(
+  "email_outbox",
+  {
+    description: "List outbox emails, newest first: id, status (draft/composed/sent/skipped), company, recipient, subject.",
+    inputSchema: { status: z.enum(["draft", "composed", "sent", "skipped", "all"]).default("all"), limit: z.number().int().default(30) },
+  },
+  async ({ status, limit }) => {
+    const rows = loadOutbox().filter((d) => status === "all" || d.status === status).reverse().slice(0, limit);
+    return text(rows.length ? rows.map((d) => `${d.id} | ${d.status} | ${d.company} | ${d.to} | ${d.subject}`).join("\n") : "Outbox empty.");
+  },
+);
+
+/**
+ * Opens Gmail's full-window compose with to/subject/body prefilled from the URL,
+ * attaches the résumé through the compose window's file input, and leaves it.
+ * Gmail autosaves it to Drafts, so it survives the tab closing.
+ */
+async function gmailCompose(d: Draft): Promise<{ ok: boolean; account: string; attached: boolean; note: string }> {
+  const p = await tab("mail");
+  const u = new URL("https://mail.google.com/mail/u/0/");
+  u.searchParams.set("view", "cm");
+  u.searchParams.set("fs", "1");
+  u.searchParams.set("tf", "1");
+  u.searchParams.set("to", d.toName ? `${d.toName} <${d.to}>` : d.to);
+  u.searchParams.set("su", d.subject);
+  u.searchParams.set("body", d.body);
+  await p.goto(u.href, { waitUntil: "domcontentloaded" });
+  if (/accounts\.google\.com|ServiceLogin/.test(p.url())) return { ok: false, account: "", attached: false, note: "Gmail is signed out in the jobscout Chrome. Sign in there once." };
+  const body = p.locator("div[aria-label='Message Body'][contenteditable=true]").first();
+  await body.waitFor({ state: "visible", timeout: 25000 });
+  const account = (await p.title()).match(/[\w.+-]+@[\w.-]+/)?.[0] ?? "";
+  let attached = false;
+  if (d.resume) {
+    const name = basename(d.resume);
+    await p.locator("input[type=file][name=Filedata]").first().setInputFiles(d.resume);
+    for (let i = 0; i < 60 && !attached; i++) {
+      attached = await p.locator(`[aria-label*="${name}"], div:has-text("${name}")`).first().isVisible().catch(() => false);
+      if (!attached) await sleep(250);
+    }
+  }
+  // Give autosave a beat so the draft exists server-side before anything else touches the tab.
+  await sleep(2500);
+  return { ok: true, account, attached, note: "" };
+}
+
+server.registerTool(
+  "email_compose",
+  {
+    description:
+      "Open an outbox email in Gmail (mail.google.com, the jobscout Chrome's signed-in account) as a compose window with recipient, subject, body and résumé filled in. Does NOT send: it stays in Gmail Drafts for the user to review and send. Marks the outbox entry 'composed'.",
+    inputSchema: { id: z.string() },
+  },
+  async ({ id }) => {
+    const all = loadOutbox();
+    const d = all.find((x) => x.id === id);
+    if (!d) return text(`No outbox email ${id}.`);
+    if (d.status === "sent") return text(`${id} was already sent on ${d.sentAt?.slice(0, 10)}.`);
+    const r = await gmailCompose(d);
+    if (!r.ok) return text(r.note);
+    d.status = "composed";
+    d.composedAt = new Date().toISOString();
+    saveOutbox(all);
+    return text(
+      `${id} open in Gmail as a draft from ${r.account || "(account not shown)"} to ${d.to}. Résumé ${d.resume ? (r.attached ? `attached (${basename(d.resume)})` : "NOT confirmed attached, check before sending") : "none"}.\nReview it in the Chrome window and press Send, then email_mark ${id} sent.`,
+    );
+  },
+);
+
+server.registerTool(
+  "email_send",
+  {
+    description:
+      "Click Send on the Gmail compose window email_compose opened for this id. Call ONLY when the user has explicitly told you to send this specific email; the default is that they send it themselves.",
+    inputSchema: { id: z.string(), confirm: z.literal(true) },
+  },
+  async ({ id }) => {
+    const all = loadOutbox();
+    const d = all.find((x) => x.id === id);
+    if (!d || d.status !== "composed") return text(`${id} isn't composed in Gmail. Run email_compose first.`);
+    const p = await tab("mail");
+    const shownTo = await p.locator(`[email="${d.to}"], span:has-text("${d.to}")`).count().catch(() => 0);
+    if (!/mail\.google\.com/.test(p.url()) || !shownTo) return text(`The mail tab isn't showing ${id}'s draft any more. Send it from Gmail Drafts, then email_mark ${id} sent.`);
+    await p.locator("div[role=button][aria-label^='Send']").first().click();
+    const sent = await p.getByText(/Message sent/i).first().waitFor({ timeout: 15000 }).then(() => true, () => false);
+    if (sent) {
+      d.status = "sent";
+      d.sentAt = new Date().toISOString();
+      saveOutbox(all);
+    }
+    return text(sent ? `SENT ${id} to ${d.to}.` : `UNCONFIRMED: no "Message sent" from Gmail. Check Sent before retrying.`);
+  },
+);
+
+server.registerTool(
+  "email_mark",
+  {
+    description: "Record what happened to an outbox email: 'sent' after the user sent it from Gmail, 'skipped' to drop it. Keeps the 45-day no-repeat rule accurate.",
+    inputSchema: { id: z.string(), status: z.enum(["sent", "skipped", "draft"]) },
+  },
+  async ({ id, status }) => {
+    const all = loadOutbox();
+    const d = all.find((x) => x.id === id);
+    if (!d) return text(`No outbox email ${id}.`);
+    d.status = status;
+    if (status === "sent") d.sentAt = new Date().toISOString();
+    saveOutbox(all);
+    return text(`${id} marked ${status}.`);
+  },
+);
+
+/**
+ * Types a LinkedIn message for a person and leaves it unsent, in a tab of its
+ * own so several can queue up for review. Uses the profile's Message button
+ * when it opens a free message (open profiles, 1st-degree), otherwise Connect
+ * with a note. Free accounts get 200 characters and a few notes a month there.
+ */
+async function linkedinCompose(url: string, subject: string, note: string, mode: "auto" | "connect"): Promise<{ route: string; note: string }> {
+  const p = await (await context()).newPage();
+  // No step on a LinkedIn tab should wait Playwright's default 30s: an element
+  // that isn't there in 8s isn't coming.
+  p.setDefaultTimeout(8000);
+  const slug = url.match(/\/in\/([^/?#]+)/)?.[1];
+  if (!slug) return { route: "error", note: "not a linkedin.com/in/ profile URL" };
+  await p.goto(`https://www.linkedin.com/in/${slug}/`, { waitUntil: "domcontentloaded" });
+  if (/authwall|login/.test(p.url())) return { route: "error", note: "LinkedIn is logged out in the jobscout Chrome." };
+  const top = p.locator("main section").first();
+  await top.waitFor({ timeout: 15000 }).catch(() => {});
+
+  const msg = top.getByRole("link", { name: /^Message$/ }).or(top.getByRole("button", { name: /^Message/ })).first();
+  if (mode === "auto" && (await msg.isVisible().catch(() => false))) {
+    await msg.click();
+    const box = p.getByRole("textbox", { name: /Write a message/i }).last();
+    const ok = await box.waitFor({ timeout: 8000 }).then(() => true, () => false);
+    // Anything that isn't a 1st-degree chat or labelled "Free message" spends an
+    // InMail credit. LinkedIn doesn't always say "InMail" in the compose window.
+    const free = await p.getByText(/^\s*Free message/i).first().isVisible().catch(() => false);
+    const firstDegree = await top.getByText(/^\s*·?\s*1st\s*$/).first().isVisible().catch(() => false);
+    const paid = !(free || firstDegree);
+    if (ok && !paid) {
+      const subj = p.getByRole("textbox", { name: /Subject/i }).last();
+      if (subject && (await subj.isVisible().catch(() => false))) await subj.fill(subject);
+      await box.fill(note);
+      return { route: "message", note: "" };
+    }
+    await p.keyboard.press("Escape").catch(() => {});
+  }
+
+  if (note.length > 200) return { route: "error", note: `No free message for this profile, and a connection note is capped at 200 characters (this one is ${note.length}). Shorten it.` };
+
+  // The profile and its dialogs can render in the page or in LinkedIn's iframe, so look in every frame.
+  const inFrames = async <T>(fn: (f: import("playwright-core").Frame) => Promise<T | null>, tries = 30): Promise<T | null> => {
+    for (let i = 0; i < tries; i++) {
+      for (const f of p.frames()) {
+        const r = await fn(f).catch(() => null);
+        if (r) return r;
+      }
+      await sleep(250);
+    }
+    return null;
+  };
+  const visible = async (l: import("playwright-core").Locator) => ((await l.isVisible()) ? l : null);
+
+  // Only ever the invite labelled with this person's name: the sidebar's
+  // "People also viewed" cards carry their own "Invite X to connect" buttons.
+  // The tab title is "Name | LinkedIn" on every layout; the h1 isn't always there.
+  let owner: string | null = null;
+  for (let i = 0; i < 20 && !owner; i++) {
+    owner = (await p.title()).match(/^(?:\(\d+\)\s*)?(.+?)\s*\|\s*LinkedIn/)?.[1]?.trim() ?? null;
+    if (!owner) await sleep(250);
+  }
+  owner ??= await inFrames(async (f) => {
+    const h = f.locator("h1").first();
+    return (await h.isVisible()) ? (await h.innerText({ timeout: 1000 })).trim() || null : null;
+  }, 8);
+  if (!owner) return { route: "error", note: "Couldn't read the profile name, so didn't look for Connect." };
+  const invite = `[aria-label="Invite ${owner.replace(/"/g, '\\"')} to connect"]`;
+  let connect = await inFrames(async (f) => visible(f.locator(invite).first()), 8);
+  if (!connect) {
+    // The profile's overflow is the icon-only button labelled "More". The global
+    // nav also has a "More", but it carries visible text, so require none.
+    const more = await inFrames(async (f) => {
+      const all = f.locator("button[aria-label='More']").filter({ hasNotText: /\w/ });
+      for (let i = 0; i < Math.min(await all.count(), 6); i++) if (await all.nth(i).isVisible()) return all.nth(i);
+      return null;
+    }, 8);
+    // A DOM click: LinkedIn's sticky nav overlaps the button once the page has scrolled.
+    if (more) await more.evaluate((e) => (e as HTMLElement).click());
+    connect = await inFrames(async (f) => {
+      const byLabel = await visible(f.locator(invite).first());
+      if (byLabel) return byLabel;
+      // Menu entries sometimes carry only the text. Inside an open menu it can only mean this profile.
+      return visible(f.locator("[role=menu] [role=menuitem], [role=menu] [role=button], .artdeco-dropdown__content--is-open [role=button]").filter({ hasText: /^\s*Connect\s*$/ }).first());
+    }, 12);
+  }
+  if (!connect) {
+    const pending = await inFrames(async (f) => visible(f.getByRole("button", { name: /^Pending/ }).first()), 4);
+    return { route: "error", note: pending ? `A request to ${owner} is already pending.` : `No Connect option for ${owner} (already connected, or LinkedIn only offers Follow).` };
+  }
+  await connect.evaluate((e) => (e as HTMLElement).click());
+  const addNote = await inFrames(async (f) => visible(f.getByRole("button", { name: /Add a (free )?note/i }).first()));
+  if (addNote) await addNote.evaluate((e) => (e as HTMLElement).click());
+  const area = await inFrames(async (f) => visible(f.locator("[role=dialog] textarea, textarea[name=message]").first()));
+  if (!area) {
+    const dialog = await inFrames(async (f) => {
+      const d = f.getByRole("dialog").first();
+      return (await d.isVisible()) ? (await d.innerText({ timeout: 1000 })).replace(/\s+/g, " ").slice(0, 300) : null;
+    }, 8);
+    return { route: "error", note: `Connect opened for ${owner} but no note box. Dialog says: ${dialog ?? "(no dialog found)"}. Nothing was sent; check the tab.` };
+  }
+  await area.fill(note);
+  return { route: "connect note", note: "" };
+}
+
+server.registerTool(
+  "linkedin_message",
+  {
+    description:
+      "Type a LinkedIn message to a person (profile URL from contacts_find) and leave it UNSENT in its own Chrome tab for the user to review and send. Uses a free message only for 1st-degree connections or profiles LinkedIn labels \"Free message\" (never spends InMail), else a connection request with a note (max 200 chars, so keep notes that short unless the profile is open). Logged in the outbox so the same person isn't messaged twice.",
+    inputSchema: {
+      company: z.string(),
+      profile: z.string().describe("https://www.linkedin.com/in/<slug>"),
+      name: z.string().optional(),
+      subject: z.string().default("").describe("used only for free messages"),
+      note: z.string().min(20).max(1900),
+      mode: z.enum(["auto", "connect"]).default("auto").describe("connect: always a connection request with the note, even when a message is possible"),
+    },
+  },
+  async (a) => {
+    const all = loadOutbox();
+    const to = `linkedin:${a.profile.match(/\/in\/([^/?#]+)/)?.[1] ?? a.profile}`;
+    const warn = outboxCheck(to, a.company.toLowerCase(), a.note, all);
+    if (warn.some((w) => w.startsWith("already"))) return text(`Skipped: ${warn.join("; ")}`);
+    const r = await Promise.race([
+      linkedinCompose(a.profile, a.subject, a.note, a.mode),
+      sleep(60000).then(() => ({ route: "error", note: "Gave up after 60s. Nothing was sent; check the tab it opened." })),
+    ]);
+    if (r.route === "error") return text(r.note);
+    const d: Draft = {
+      id: `e${all.length + 1}`,
+      channel: "linkedin",
+      company: a.company,
+      domain: a.company.toLowerCase(),
+      to,
+      toName: a.name ?? null,
+      subject: a.subject,
+      body: a.note,
+      resume: null,
+      status: "composed",
+      createdAt: new Date().toISOString(),
+      composedAt: new Date().toISOString(),
+      source: a.profile,
+    };
+    saveOutbox([...all, d]);
+    return text(`${d.id} typed as a ${r.route} to ${a.name ?? to}, unsent, in its own tab. Send it there, then email_mark ${d.id} sent.${warn.length ? `\nWARN: ${warn.join("; ")}` : ""}`);
+  },
+);
+
+server.registerTool(
+  "page_controls",
+  {
+    description:
+      "Read-only: open a URL in the work tab and list its buttons, links and menu items (role, aria-label, text) across all frames, optionally filtered by a regex. Clicks nothing. For checking what a page actually labels its controls before automating it.",
+    inputSchema: {
+      url: z.string().optional().describe("omit to read the work tab as it is"),
+      match: z.string().optional().describe("case-insensitive regex over label and text, e.g. 'connect|more|note'"),
+      limit: z.number().int().default(40),
+    },
+  },
+  async ({ url, match, limit }) => {
+    const p = await tab("work");
+    if (url) {
+      await p.goto(url, { waitUntil: "domcontentloaded" });
+      await p.waitForLoadState("load", { timeout: 8000 }).catch(() => {});
+      await sleep(1500);
+    }
+    const re = match ? new RegExp(match, "i") : null;
+    const rows: string[] = [];
+    for (const f of p.frames()) {
+      const items = await f
+        .evaluate(() =>
+          Array.from(document.querySelectorAll("button, a, [role=button], [role=menuitem], [role=link]")).map((e) => {
+            const el = e as HTMLElement;
+            const r = el.getBoundingClientRect();
+            return {
+              role: el.getAttribute("role") ?? el.tagName.toLowerCase(),
+              label: el.getAttribute("aria-label") ?? "",
+              text: el.innerText.replace(/\s+/g, " ").trim().slice(0, 60),
+              shown: r.width > 0 && r.height > 0,
+            };
+          }),
+        )
+        .catch(() => []);
+      const tag = f === p.mainFrame() ? "main" : `frame ${new URL(f.url() || "about:blank").pathname.slice(0, 30)}`;
+      for (const i of items) {
+        if (re && !re.test(`${i.label} ${i.text}`)) continue;
+        rows.push(`${tag} | ${i.role} | ${i.label || "-"} | ${i.text || "-"}${i.shown ? "" : " | hidden"}`);
+      }
+    }
+    return text(`${await p.title()} | ${p.url()}\nframe | role | aria-label | text\n${rows.slice(0, limit).join("\n") || "no matches"}`);
   },
 );
 
