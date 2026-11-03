@@ -67,6 +67,7 @@ export const profile = {
     "full-stack",
     "software engineer",
     "software development engineer",
+    "software developer",
     "platform engineer",
     "application engineer",
     "product engineer",
