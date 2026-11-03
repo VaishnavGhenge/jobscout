@@ -71,6 +71,12 @@ export const profile = {
     "application engineer",
     "product engineer",
     "sde",
+    /**
+     * "Python Developer" and "Golang Developer" carry no other role or level
+     * word, so without this they sat at 58, under the watcher's 70. Off-stack
+     * developer titles (".NET Developer") still lose 22 for the stack.
+     */
+    "developer",
   ],
 
   /**
@@ -108,6 +114,26 @@ export const profile = {
     "redis",
     "kubernetes",
     "grpc",
+  ],
+
+  /**
+   * The part of `techKeywords` you get shortlisted on: Python, Go and Node.
+   * These carry the full stack weight. The rest of `techKeywords` (React,
+   * Postgres, Kubernetes and so on) still counts, but at a fraction, so a
+   * "React Developer" role no longer ranks level with a "Golang Developer" one.
+   *
+   * Every entry here must also be in `techKeywords`.
+   */
+  primaryStack: [
+    "python",
+    "django",
+    "fastapi",
+    "flask",
+    "go",
+    "golang",
+    "node",
+    "nodejs",
+    "node.js",
   ],
 
   /**
@@ -425,10 +451,14 @@ export const profile = {
     /** Senior: still shown, but never above a role in your own band. */
     levelStretch: -14,
     levelAvoid: -45,
-    /** Your stack, named in the title. A deliberate signal. */
+    /** Python, Go or Node named in the title. A deliberate signal. */
     techMatch: 14,
-    /** Your stack, only in the body. Every JD lists a dozen technologies. */
+    /** Python, Go or Node only in the body. Every JD lists a dozen technologies. */
     techMatchBody: 6,
+    /** The rest of your stack (React, Postgres...) in the title, no primary anywhere. */
+    techSecondary: 6,
+    /** The rest of your stack only in the body. */
+    techSecondaryBody: 2,
     /** A stack you don't work in, named in the title. */
     offStackTech: -22,
     /** Adjacent discipline (mobile, ML, data): a real role, just not yours. */

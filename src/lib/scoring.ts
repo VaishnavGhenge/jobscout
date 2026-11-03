@@ -125,14 +125,25 @@ export function scoreJob(
   }
 
   // Prefer stack in the title (a deliberate signal) over stack in the body
-  // (every JD lists a dozen technologies).
+  // (every JD lists a dozen technologies), and Python/Go/Node over the rest of
+  // the stack. Exactly one tier applies, best-first: a primary in the JD still
+  // beats React in the title, since React alone is not what gets you shortlisted.
+  const primary: readonly string[] = profile.primaryStack;
   const titleTech = matchTerms(title, profile.techKeywords);
   const bodyTech = matchTerms(description, profile.techKeywords);
-  if (titleTech.length) {
+  const titlePrimary = titleTech.filter((t) => primary.includes(t));
+  const bodyPrimary = bodyTech.filter((t) => primary.includes(t));
+  if (titlePrimary.length) {
     score += w.techMatch;
+    reasons.push(`stack: ${titlePrimary.slice(0, 3).join(", ")}`);
+  } else if (bodyPrimary.length) {
+    score += w.techMatchBody;
+    reasons.push(`stack in JD: ${bodyPrimary.slice(0, 3).join(", ")}`);
+  } else if (titleTech.length) {
+    score += w.techSecondary;
     reasons.push(`stack: ${titleTech.slice(0, 3).join(", ")}`);
   } else if (bodyTech.length) {
-    score += w.techMatchBody;
+    score += w.techSecondaryBody;
     reasons.push(`stack in JD: ${bodyTech.slice(0, 3).join(", ")}`);
   }
 
