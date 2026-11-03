@@ -1,8 +1,14 @@
 name: Watch for new postings
 
-# Runs tools/watch every 10 minutes so phone alerts keep coming with the laptop
-# shut. GitHub can delay scheduled runs by several minutes under load, and
-# disables schedules on a public repo after 60 days without a commit.
+# Runs tools/watch hourly so phone alerts keep coming with the laptop shut.
+#
+# GitHub treats schedules as best-effort. At */10 it ran 16 times in four days,
+# 3 to 7 hours apart, so most ticks were dropped. Hourly at minute 17 avoids the
+# top-of-hour rush when GitHub sheds the most scheduled runs. The LinkedIn
+# searches look back 6 hours (searches.json) so a dropped tick or two still
+# misses nothing; seen ids are remembered, so the overlap never re-alerts.
+# GitHub also disables schedules on a public repo after 60 days without a
+# commit.
 #
 # The repo is public, so the logs are too. The watcher prints counts only when
 # CI is set, never which roles it alerted on. NTFY_TOPIC and DATABASE_URL are
@@ -14,7 +20,7 @@ name: Watch for new postings
 # rather than alerting on everything at once.
 on:
   schedule:
-    - cron: "*/10 * * * *"
+    - cron: "17 * * * *"
   workflow_dispatch: {}
 
 concurrency:
