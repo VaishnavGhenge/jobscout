@@ -1,12 +1,15 @@
 name: Watch for new postings
 
-# Runs tools/watch hourly so phone alerts keep coming with the laptop shut.
+# Runs tools/watch so phone alerts keep coming with the laptop shut.
 #
-# GitHub treats schedules as best-effort. At */10 it ran 16 times in four days,
-# 3 to 7 hours apart, so most ticks were dropped. Hourly at minute 17 avoids the
-# top-of-hour rush when GitHub sheds the most scheduled runs. The LinkedIn
-# searches look back 6 hours (searches.json) so a dropped tick or two still
-# misses nothing; seen ids are remembered, so the overlap never re-alerts.
+# GitHub treats schedules as best-effort and drops most ticks on a free public
+# repo: at */10 it ran 16 times in four days, and hourly at minute 17 ran 3
+# times in 26 hours. So the real clock is cron-job.org, which calls the
+# workflow_dispatch API every 15 minutes with a fine-grained token scoped to
+# this repo (Actions: write). The schedule below stays as a fallback in case
+# that service stops. The LinkedIn searches look back 12 hours (searches.json)
+# so even a long gap misses nothing; seen ids are remembered, so the overlap
+# never re-alerts.
 # GitHub also disables schedules on a public repo after 60 days without a
 # commit.
 #

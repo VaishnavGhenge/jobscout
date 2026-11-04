@@ -1,15 +1,15 @@
 [
-  { "keywords": "backend engineer", "location": "India", "experience": ["entry", "associate", "mid-senior"], "postedWithinSeconds": 21600, "sort": "DD" },
-  { "keywords": "python developer", "location": "India", "experience": ["entry", "associate", "mid-senior"], "postedWithinSeconds": 21600, "sort": "DD" },
-  { "keywords": "python backend", "location": "India", "experience": ["entry", "associate", "mid-senior"], "postedWithinSeconds": 21600, "sort": "DD" },
-  { "keywords": "django", "location": "India", "postedWithinSeconds": 21600, "sort": "DD" },
-  { "keywords": "fastapi", "location": "India", "postedWithinSeconds": 21600, "sort": "DD" },
-  { "keywords": "golang developer", "location": "India", "experience": ["entry", "associate", "mid-senior"], "postedWithinSeconds": 21600, "sort": "DD" },
-  { "keywords": "golang", "location": "India", "workplace": ["remote"], "postedWithinSeconds": 21600, "sort": "DD" },
-  { "keywords": "node.js developer", "location": "India", "experience": ["entry", "associate", "mid-senior"], "postedWithinSeconds": 21600, "sort": "DD" },
-  { "keywords": "nodejs backend", "location": "India", "experience": ["entry", "associate", "mid-senior"], "postedWithinSeconds": 21600, "sort": "DD" },
-  { "keywords": "full stack engineer", "location": "India", "experience": ["entry", "associate", "mid-senior"], "postedWithinSeconds": 21600, "sort": "DD" },
-  { "keywords": "software developer", "location": "India", "experience": ["entry", "associate", "mid-senior"], "postedWithinSeconds": 21600, "sort": "DD" },
-  { "keywords": "software engineer", "location": "India", "workplace": ["remote"], "experience": ["entry", "associate", "mid-senior"], "postedWithinSeconds": 21600, "sort": "DD" },
-  { "keywords": "software engineer", "location": "Pune, Maharashtra, India", "experience": ["entry", "associate", "mid-senior"], "postedWithinSeconds": 21600, "sort": "DD" }
+  { "keywords": "backend engineer", "location": "India", "experience": ["entry", "associate", "mid-senior"], "postedWithinSeconds": 43200, "sort": "DD" },
+  { "keywords": "python developer", "location": "India", "experience": ["entry", "associate", "mid-senior"], "postedWithinSeconds": 43200, "sort": "DD" },
+  { "keywords": "python backend", "location": "India", "experience": ["entry", "associate", "mid-senior"], "postedWithinSeconds": 43200, "sort": "DD" },
+  { "keywords": "django", "location": "India", "postedWithinSeconds": 43200, "sort": "DD" },
+  { "keywords": "fastapi", "location": "India", "postedWithinSeconds": 43200, "sort": "DD" },
+  { "keywords": "golang developer", "location": "India", "experience": ["entry", "associate", "mid-senior"], "postedWithinSeconds": 43200, "sort": "DD" },
+  { "keywords": "golang", "location": "India", "workplace": ["remote"], "postedWithinSeconds": 43200, "sort": "DD" },
+  { "keywords": "node.js developer", "location": "India", "experience": ["entry", "associate", "mid-senior"], "postedWithinSeconds": 43200, "sort": "DD" },
+  { "keywords": "nodejs backend", "location": "India", "experience": ["entry", "associate", "mid-senior"], "postedWithinSeconds": 43200, "sort": "DD" },
+  { "keywords": "full stack engineer", "location": "India", "experience": ["entry", "associate", "mid-senior"], "postedWithinSeconds": 43200, "sort": "DD" },
+  { "keywords": "software developer", "location": "India", "experience": ["entry", "associate", "mid-senior"], "postedWithinSeconds": 43200, "sort": "DD" },
+  { "keywords": "software engineer", "location": "India", "workplace": ["remote"], "experience": ["entry", "associate", "mid-senior"], "postedWithinSeconds": 43200, "sort": "DD" },
+  { "keywords": "software engineer", "location": "Pune, Maharashtra, India", "experience": ["entry", "associate", "mid-senior"], "postedWithinSeconds": 43200, "sort": "DD" }
 ]
