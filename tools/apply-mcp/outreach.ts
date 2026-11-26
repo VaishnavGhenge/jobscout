@@ -388,3 +388,25 @@ export function outboxCheck(to: string, domain: string, body: string, all: Draft
   if (/\{\{|\[(name|company|role)\]/i.test(body)) warn.push("unfilled placeholder in body");
   return warn;
 }
+
+// ---------------------------------------------------------------------------
+// Research store
+
+/**
+ * Everything the research tools find, kept so a later session can use it
+ * without searching again: one JSON file per kind under ~/.jobscout/outreach.
+ * Personal data about real people, so it stays on this machine and out of git.
+ */
+export type ResearchKind = "contacts" | "joiners";
+
+export function saveResearch(kind: ResearchKind, company: string, rows: object[]): void {
+  if (!rows.length) return;
+  const file = join(DIR, `${kind}.json`);
+  let all: Record<string, { at: string; rows: object[] }> = {};
+  try {
+    all = JSON.parse(readFileSync(file, "utf8"));
+  } catch {}
+  all[company] = { at: new Date().toISOString(), rows };
+  if (!existsSync(DIR)) mkdirSync(DIR, { recursive: true });
+  writeFileSync(file, JSON.stringify(all, null, 2));
+}

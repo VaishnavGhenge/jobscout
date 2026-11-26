@@ -42,7 +42,7 @@ import {
 } from "../lib/linkedin";
 import { dedupePosts, formatPost, triagePost, type RawPost } from "../lib/posts";
 import {
-  DAILY_CAP, bingSearch, boardFit, discoverFit, formatFit, loadOutbox, outboxCheck, resolveDomain, saveOutbox, webContacts,
+  DAILY_CAP, bingSearch, boardFit, discoverFit, formatFit, loadOutbox, outboxCheck, resolveDomain, saveOutbox, saveResearch, webContacts,
   type Contact, type Draft, type Searcher, type WebHit,
 } from "./outreach";
 
@@ -847,7 +847,10 @@ server.registerTool(
     for (const [k, v] of Object.entries(answers ?? {})) {
       const f = s.fields.find((x) => x.n === Number(k));
       if (!f) continue;
-      f.answer = f.options?.length && !f.options.includes(v) ? chooseOption(v, f.options) ?? v : v;
+      const pick = (a: string) => (f.options?.length && !f.options.includes(a) ? chooseOption(a, f.options) ?? a : a);
+      // Checkbox answers are several options joined by ';'. Matched whole, the
+      // string fell back to the first prefix hit, so "Django;FastAPI" ticked Django only.
+      f.answer = f.type === "checkbox" ? v.split(/\s*;\s*/).filter(Boolean).map(pick).join(";") : pick(v);
       f.from = "you";
     }
     const bank = loadBank();
@@ -1087,6 +1090,7 @@ server.registerTool(
     const ppl = [...(people === "login" ? [] : people), ...viaGoogle].filter(
       (c, i, all) => all.findIndex((o) => slug(o.source) === slug(c.source)) === i,
     );
+    saveResearch("contacts", company, [...web.contacts, ...ppl].map((c) => ({ ...c, domain: d })));
     const lines = [...web.contacts, ...ppl].map(
       (c) => `${c.kind} | ${c.email ?? "-"} | ${c.name ?? ""}${c.role ? ` (${c.role})` : ""} | ${c.source}`,
     );
@@ -1439,6 +1443,215 @@ server.registerTool(
       }
     }
     return text(`${await p.title()} | ${p.url()}\nframe | role | aria-label | text\n${rows.slice(0, limit).join("\n") || "no matches"}`);
+  },
+);
+
+/**
+ * Positions from a LinkedIn /details/experience/ page's text, anchored on each
+ * date line ("Apr 2026 - Present · 8 mos"). Two shapes, as LinkedIn renders them:
+ *
+ *   single role             several roles at one company
+ *   SWE Intern              Harness
+ *   Traceable · Internship  1 yr 9 mos          <- group header + total span
+ *   Jul 2024 - Mar 2025     SDE 2
+ *                           Full-time           <- type alone
+ *                           Apr 2026 - Present
+ */
+interface Position { title: string; company: string; from: string; to: string; span: string; intern: boolean }
+const DATES = /^((?:[A-Z][a-z]{2} )?\d{4})\s*[-–]\s*(Present|(?:[A-Z][a-z]{2} )?\d{4})(?:\s*·\s*(.+))?$/;
+const EMP_TYPES = "Full-time|Part-time|Internship|Contract|Freelance|Self-employed|Apprenticeship|Trainee|Seasonal";
+const EMP_ALONE = new RegExp(`^(${EMP_TYPES})$`, "i");
+const CO_EMP = new RegExp(`^(.+?)\\s*·\\s*(${EMP_TYPES})$`, "i");
+/** A group header's span line: "1 yr 9 mos", or with the type first, "Full-time · 2 yrs 4 mos". */
+const SPAN_ONLY = new RegExp(`^((${"Full-time|Part-time|Internship|Contract|Freelance|Self-employed|Apprenticeship|Trainee|Seasonal"})\\s*·\\s*)?(\\d+ yrs?( \\d+ mos?)?|\\d+ mos?)$`, "i");
+const NOT_ROLE = /(^|·\s*)(On-site|Remote|Hybrid)$|,\s*India\b|\b(Area|District|Metropolitan Region)\b|^Skills:|\+\d+ skills$|skills$/i;
+function parseExperience(textBlock: string): Position[] {
+  const all = textBlock.split("\n").map((l) => l.trim()).filter(Boolean);
+  const end = all.findIndex((l) => /^(More profiles for you|People you may know|Explore Premium profiles)$/.test(l));
+  // Locations ("Pune District, Maharashtra, India · On-site", "Remote") and skill
+  // lines are never a title or company; dropping them first keeps the
+  // look-back below from landing on one.
+  const lines = (end > 0 ? all.slice(0, end) : all).filter((l) => !NOT_ROLE.test(l));
+  const out: Position[] = [];
+  let header = "";
+  for (let i = 0; i < lines.length; i++) {
+    if (SPAN_ONLY.test(lines[i + 1] ?? "") && !DATES.test(lines[i])) {
+      header = lines[i];
+      continue;
+    }
+    const m = lines[i].match(DATES);
+    if (!m) continue;
+    const l1 = lines[i - 1] ?? "";
+    let title: string, company: string, type = "";
+    const co = l1.match(CO_EMP);
+    if (co) {
+      [title, company, type] = [lines[i - 2] ?? "", co[1], co[2]];
+      header = "";
+    } else if (EMP_ALONE.test(l1)) {
+      [title, company, type] = [lines[i - 2] ?? "", header || (lines[i - 3] ?? ""), l1];
+    } else if (header && (SPAN_ONLY.test(lines[i - 2] ?? "") || DATES.test(lines[i - 2] ?? ""))) {
+      // Inside a group: the line above is the title, the group header the company.
+      [title, company] = [l1, header];
+    } else {
+      // A single role with no type line is "Title / Company / dates".
+      [title, company] = [lines[i - 2] ?? "", l1];
+      header = "";
+    }
+    out.push({ title, company, from: m[1], to: m[2], span: m[3] ?? "", intern: /intern|trainee|apprentice/i.test(`${type} ${title}`) });
+  }
+  return out;
+}
+
+function monthsAgo(d: string): number | null {
+  const m = d.match(/^(?:([A-Z][a-z]{2}) )?(\d{4})$/);
+  if (!m) return null;
+  const mon = m[1] ? "JanFebMarAprMayJunJulAugSepOctNovDec".indexOf(m[1]) / 3 : 0;
+  const now = new Date();
+  return (now.getFullYear() - +m[2]) * 12 + (now.getMonth() - mon);
+}
+
+server.registerTool(
+  "people_switched",
+  {
+    description:
+      "Who recently joined a company as an engineer, and where they came from: finds engineers there via Google's index of LinkedIn profiles, reads each one's Experience page in the logged-in browser, and keeps those whose current role at the company started within `months`. Per person: title they joined as, start date, previous company/title/tenure, total years before joining. Recent joiners are also the likeliest referrers. Reads up to `max` profiles (each one LinkedIn page load), so keep max small.",
+    inputSchema: {
+      company: z.string(),
+      // A bare phrase: with an "(a OR b OR c)" group Google returned nothing for six companies in a row.
+      roles: z.string().default("software engineer").describe("Google terms for the title; keep it one phrase"),
+      months: z.number().int().min(1).max(36).default(12),
+      max: z.number().int().min(1).max(15).default(8),
+    },
+  },
+  async ({ company, roles, months, max }) => {
+    const hits = await webSearch(`site:linkedin.com/in "${company}" ${roles} India`, 20).catch(() => []);
+    const co = company.toLowerCase();
+    const profiles = [...new Map(
+      hits
+        .filter((h) => /linkedin\.com\/in\//.test(h.url) && `${h.title} ${h.snippet}`.toLowerCase().includes(co))
+        .map((h) => [h.url.match(/\/in\/([^/?#]+)/)?.[1] ?? h.url, h] as const),
+    ).entries()].slice(0, max);
+    if (!profiles.length) return text(`No LinkedIn profiles for ${company} in Google's results.`);
+
+    const p = await tab("work");
+    const rows: string[] = [];
+    const found: object[] = [];
+    let earlier = 0;
+    let unreadable = 0;
+    for (const [slug, h] of profiles) {
+      await p.goto(`https://www.linkedin.com/in/${slug}/details/experience/`, { waitUntil: "domcontentloaded" });
+      if (/authwall|login|checkpoint/.test(p.url())) return text("LinkedIn is logged out (or asking for a check) in the jobscout Chrome.");
+      await p.waitForLoadState("load", { timeout: 8000 }).catch(() => {});
+      await sleep(1200);
+      const body = (await Promise.all(p.frames().map((f) => f.evaluate(() => (document.querySelector("main") as HTMLElement | null)?.innerText ?? "").catch(() => "")))).join("\n");
+      const pos = parseExperience(body);
+      const key = co.split(/\s+/)[0];
+      const here = pos.filter((x) => x.company.toLowerCase().includes(key));
+      if (!here.some((x) => x.to === "Present")) {
+        unreadable++;
+        continue;
+      }
+      // Joined = the earliest role at the company. A promotion starts a new
+      // title, not a new job, and must not read as a switch.
+      const first = here[here.length - 1];
+      const now = here[0];
+      const ago = monthsAgo(first.from);
+      if (ago == null || ago > months) {
+        earlier++;
+        continue;
+      }
+      const joinedAgo = ago;
+      const before = pos.filter((x) => !x.company.toLowerCase().includes(key) && (monthsAgo(x.from) ?? 0) >= joinedAgo);
+      const prev = before.find((x) => !x.intern) ?? before[0];
+      const ft = before.filter((x) => !x.intern).map((x) => monthsAgo(x.from) ?? 0);
+      const yrs = ft.length ? ((Math.max(...ft) - joinedAgo) / 12).toFixed(1) : "0";
+      const name = h.title.split(/\s+[-|–]\s+/)[0];
+      found.push({
+        name, profile: `https://www.linkedin.com/in/${slug}`, joined: first.from, joinedAs: first.title, joinedAsIntern: first.intern,
+        now: now.title, previous: prev ? { title: prev.title, company: prev.company, from: prev.from, to: prev.to, intern: prev.intern } : null,
+        fullTimeYearsBefore: +yrs, path: before.slice(0, 4).map((x) => x.company),
+      });
+      rows.push(
+        `${name} | joined ${first.from} as ${first.title}${first.intern ? " (intern)" : ""}${now !== first ? `, now ${now.title}` : ""}` +
+          ` | before: ${prev ? `${prev.title} @ ${prev.company} (${prev.from}-${prev.to}${prev.intern ? ", intern" : ""})` : "nothing (fresher)"}` +
+          ` | ${yrs}y full-time before | path: ${before.slice(0, 3).map((x) => x.company).join(" < ") || "-"} | linkedin.com/in/${slug}`,
+      );
+      await sleep(1500);
+    }
+    saveResearch("joiners", company, found);
+    return text(
+      `${company}: ${rows.length} joined in the last ${months} months, ${earlier} joined earlier, ${unreadable} couldn't be read (left, or page shape not parsed), from ${profiles.length} profiles\n` +
+        (rows.join("\n") || "none recent in this sample"),
+    );
+  },
+);
+
+server.registerTool(
+  "linkedin_reply",
+  {
+    description:
+      "Type a reply in an EXISTING LinkedIn conversation (the person has messaged before, so it's free, never InMail), optionally attach a résumé, and leave it UNSENT in its own tab for the user to send. Refuses when there's no prior conversation.",
+    inputSchema: {
+      company: z.string(),
+      profile: z.string().describe("https://www.linkedin.com/in/<slug>"),
+      name: z.string().optional(),
+      note: z.string().min(2).max(3000),
+      resume: z.string().optional().describe("attach this résumé (key from applicant.json: backend, fullstack, or a path); omit for no attachment"),
+    },
+  },
+  async (a) => {
+    const slug = a.profile.match(/\/in\/([^/?#]+)/)?.[1];
+    if (!slug) return text("Not a linkedin.com/in/ profile URL.");
+    const p = await (await context()).newPage();
+    p.setDefaultTimeout(8000);
+    const run = async (): Promise<string> => {
+      await p.goto(`https://www.linkedin.com/in/${slug}/`, { waitUntil: "domcontentloaded" });
+      if (/authwall|login/.test(p.url())) return "LinkedIn is logged out in the jobscout Chrome.";
+      const msg = p.getByRole("link", { name: /^Message$/ }).or(p.getByRole("button", { name: /^Message/ })).first();
+      await msg.waitFor({ timeout: 15000 });
+      await msg.evaluate((e) => (e as HTMLElement).click());
+      const box = p.getByRole("textbox", { name: /Write a message/i }).last();
+      await box.waitFor({ timeout: 10000 });
+      // A thread with history shows "<name> sent the following message(s)"; a fresh compose
+      // (which would be InMail for a non-connection) doesn't.
+      await sleep(1500);
+      const history = await p.getByText(/sent the following messages?/i).first().isVisible().catch(() => false);
+      if (!history) {
+        await p.keyboard.press("Escape").catch(() => {});
+        return "No earlier conversation with this person, so a reply here would be a new (possibly InMail) message. Nothing typed.";
+      }
+      await box.fill(a.note);
+      let attached = "no résumé";
+      // Only when asked: a "thanks anyway" shouldn't carry a résumé.
+      const file = a.resume !== undefined ? resumePath(a.resume, loadBank()) : null;
+      if (file) {
+        const input = p.locator("form input[type=file], .msg-form input[type=file], input[type=file]").last();
+        await input.setInputFiles(file);
+        const name = basename(file);
+        let ok = false;
+        for (let i = 0; i < 40 && !ok; i++) {
+          ok = await p.getByText(name, { exact: false }).first().isVisible().catch(() => false);
+          if (!ok) await sleep(250);
+        }
+        attached = ok ? `attached ${name}` : `résumé NOT confirmed attached (${name}); check before sending`;
+      }
+      return `Reply typed to ${a.name ?? slug}, ${attached}, unsent in its own tab. Review and press Send.`;
+    };
+    const r = await Promise.race([run(), sleep(60000).then(() => "Gave up after 60s. Nothing was sent; check the tab.")]).catch(
+      (e: Error) => `Failed: ${e.message.split("\n")[0]}. Nothing was sent.`,
+    );
+    if (r.startsWith("Reply typed")) {
+      const all = loadOutbox();
+      saveOutbox([
+        ...all,
+        {
+          id: `e${all.length + 1}`, channel: "linkedin", company: a.company, domain: a.company.toLowerCase(),
+          to: `linkedin:${slug}`, toName: a.name ?? null, subject: "", body: a.note, resume: null,
+          status: "composed", createdAt: new Date().toISOString(), composedAt: new Date().toISOString(), source: a.profile,
+        },
+      ]);
+    }
+    return text(r);
   },
 );
 
