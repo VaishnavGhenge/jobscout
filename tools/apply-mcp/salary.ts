@@ -14,6 +14,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Searcher } from "./outreach";
+import { cityOf } from "@/lib/location-pref";
 
 export interface Figure {
   /** Lakhs per year. */
@@ -31,11 +32,19 @@ export interface Figure {
   page?: boolean;
   /** Set by lookupSalary: the figure is for the role asked about, so it counts toward the median. */
   relevant?: boolean;
+  /** The city the figure is for, when its text or URL names one. */
+  city?: string | null;
+  /** Why it isn't counted: "other role", "other city", "7+ yrs". */
+  skip?: string | null;
 }
 
 export interface Estimate {
   company: string;
   role: string;
+  /** The job's city, folded ("bangalore"), or null for India-wide. */
+  city: string | null;
+  /** "city" when the median uses only that city's figures, "india" when it had to fall back to all of India. */
+  scope: "city" | "india";
   at: string;
   /** Median of the per-source midpoints, lakhs per year. */
   medianLpa: number | null;
@@ -125,9 +134,13 @@ function sourceOf(url: string): string {
 const OTHER_ROLE =
   /\b(senior|sr|staff|principal|lead|manager|director|architect|analyst|administrator|admin|consultant|iii|iv|head|vp|intern|fresher|accountant|hr|sales|support|qa|test|tester|marketing|recruiter|designer)\b/i;
 
-/** Does this figure describe the role asked about, at roughly your experience? */
-function isRelevant(f: Figure, role: string): boolean {
-  if (f.exp !== null && f.exp > 6) return false;
+/** Why a figure doesn't describe the role asked about at your experience, or null when it does. */
+function skipReason(f: Figure, role: string): string | null {
+  if (f.exp !== null && f.exp > 6) return "7+ yrs";
+  return roleMatches(f, role) ? null : "other role";
+}
+
+function roleMatches(f: Figure, role: string): boolean {
   const words = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, " ");
   // Page text runs every role's figures together with the titles stripped, so a
   // page figure counts only when its label names the role.
@@ -156,12 +169,14 @@ function median(xs: number[]): number | null {
 export async function lookupSalary(
   company: string,
   role: string,
-  city: string | undefined,
+  cityName: string | undefined,
   search: Searcher,
   read: ((url: string) => Promise<string>) | null,
 ): Promise<Estimate> {
   const c = `"${company}"`;
-  const where = city ? ` ${city}` : " India";
+  const city = cityName ? cityOf(cityName) ?? cityName.toLowerCase() : null;
+  // Search with the job's own spelling: Glassdoor and Levels.fyi title their pages "Bengaluru", AmbitionBox "Bangalore".
+  const where = cityName ? ` ${cityName}` : " India";
   const queries = [
     `${c} ${role} salary site:ambitionbox.com`,
     `${c} ${role} salary${where} site:glassdoor.co.in`,
@@ -195,8 +210,33 @@ export async function lookupSalary(
     const k = `${f.source}|${f.low}|${f.high}`;
     return !seen.has(k) && seen.add(k);
   });
-  for (const f of uniq) f.relevant = isRelevant(f, role);
-  const counted = uniq.filter((f) => f.relevant);
+  // Pay is set per city: Pune and Bengaluru bands at one company differ by
+  // 20-30%. A figure that names another city is skipped; one naming none is
+  // India-wide and used only when the job's city has too few of its own.
+  for (const f of uniq) {
+    const slug = decodeURIComponent(f.url.replace(/^https?:\/\/[^/]+/, "")).replace(/[^a-z]+/gi, " ");
+    f.city = cityOf(`${f.label} ${slug} ${f.context}`);
+    f.skip = skipReason(f, role) ?? (city && f.city && f.city !== city ? "other city" : null);
+    f.relevant = !f.skip;
+  }
+  const local = uniq.filter((f) => f.relevant && city && f.city === city);
+  const scope: Estimate["scope"] = city && local.length >= 2 ? "city" : "india";
+  let counted = scope === "city" ? local : uniq.filter((f) => f.relevant);
+  // Levels.fyi's headline is an all-levels median: ₹1.03 Cr for "Software
+  // Engineer" at CrowdStrike Pune, against ₹8-24L everywhere else, and with two
+  // sources it alone pushed the median over the floor. With three or more
+  // figures, one 2.5x away from the middle is shown but not counted.
+  if (counted.length >= 3) {
+    const mid = (f: Figure) => (f.low + f.high) / 2;
+    const m = median(counted.map(mid))!;
+    for (const f of counted) {
+      if (mid(f) > m * 2.5 || mid(f) < m / 2.5) {
+        f.relevant = false;
+        f.skip = "outlier against the other figures";
+      }
+    }
+    counted = counted.filter((f) => f.relevant);
+  }
   // Per source, the median midpoint, so a site that returned ten rows doesn't outvote one that returned two.
   const bySource = new Map<string, number[]>();
   for (const f of counted) bySource.set(f.source, [...(bySource.get(f.source) ?? []), (f.low + f.high) / 2]);
@@ -204,6 +244,8 @@ export async function lookupSalary(
   const est: Estimate = {
     company,
     role,
+    city,
+    scope,
     at: new Date().toISOString(),
     medianLpa: median(mids),
     lowLpa: counted.length ? Math.min(...counted.map((f) => f.low)) : null,
@@ -228,33 +270,48 @@ function loadAll(): Record<string, Estimate> {
   }
 }
 
-const key = (company: string) => company.toLowerCase().replace(/\s+(pvt|private|ltd|limited|inc|llp|india)\.?/g, "").trim();
+const key = (company: string, city: string | null) =>
+  `${company.toLowerCase().replace(/\s+(pvt|private|ltd|limited|inc|llp|india)\.?/g, "").trim()}|${city ?? ""}`;
 
 function saveEstimate(e: Estimate): void {
   const all = loadAll();
-  all[key(e.company)] = e;
+  all[key(e.company, e.scope === "city" ? e.city : null)] = e;
   const dir = join(homedir(), ".jobscout");
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   writeFileSync(FILE, JSON.stringify(all, null, 2));
 }
 
 /** The cached median for a company, when it's recent enough to trust. */
-export function cachedEstimate(company: string): number | null {
-  const e = loadAll()[key(company)];
-  if (!e?.medianLpa) return null;
-  return Date.now() - new Date(e.at).getTime() < MAX_AGE_DAYS * 86_400_000 ? e.medianLpa : null;
+/**
+ * The cached median for a company in a city, when recent enough to trust: that
+ * city's own estimate first, then the India-wide one. `est.` on a row says
+ * which ("est. ₹24L Pune", "est. ₹22L India").
+ */
+export function cachedEstimate(company: string, city: string | null): { lpa: number; where: string } | null {
+  const all = loadAll();
+  const fresh = (e?: Estimate) => (e?.medianLpa && Date.now() - new Date(e.at).getTime() < MAX_AGE_DAYS * 86_400_000 ? e : null);
+  const e = (city ? fresh(all[key(company, city)]) : null) ?? fresh(all[key(company, null)]);
+  return e ? { lpa: e.medianLpa!, where: e.scope === "city" && e.city ? e.city : "India" } : null;
 }
+
+const cap = (s: string) => s.replace(/\b\w/g, (c) => c.toUpperCase());
 
 export function formatEstimate(e: Estimate, floor: number | null): string {
   if (!e.figures.length) return `${e.company}: no pay figures found for "${e.role}". Ask the recruiter for the band.`;
-  const counted = e.figures.filter((f) => f.relevant);
-  const fmt = (f: Figure) => `${f.source} | ₹${f.low}${f.high !== f.low ? `-${f.high}` : ""}L | ${f.context.slice(0, 170)} | ${f.url}`;
-  const others = e.figures.filter((f) => !f.relevant);
-  const tail = others.length ? [`other roles or 7+ yrs, not counted (${others.length}):`, ...others.slice(0, 5).map(fmt)] : [];
-  if (!counted.length) return [`${e.company}: no figures for "${e.role}" itself; only other roles.`, ...tail].join("\n");
+  const inScope = (f: Figure) => f.relevant && (e.scope !== "city" || f.city === e.city);
+  const counted = e.figures.filter(inScope);
+  const fmt = (f: Figure) =>
+    `${f.source} | ₹${f.low}${f.high !== f.low ? `-${f.high}` : ""}L | ${f.city ? cap(f.city) : "India"} | ${f.context.slice(0, 160)} | ${f.url}`;
+  const others = e.figures.filter((f) => !inScope(f));
+  const why = (f: Figure) => f.skip ?? "India-wide, city figures used instead";
+  const tail = others.length
+    ? [`not counted (${others.length}):`, ...others.slice(0, 6).map((f) => `${fmt(f)} | ${why(f)}`)]
+    : [];
+  if (!counted.length) return [`${e.company}: no figures for "${e.role}" itself.`, ...tail].join("\n");
+  const scope = e.scope === "city" ? `${cap(e.city!)} figures only` : e.city ? `India-wide, too few ${cap(e.city)} figures` : "India-wide";
   const head =
-    `${e.company} · ${e.role}: median ₹${e.medianLpa}L from ${counted.length} figures across ${new Set(counted.map((f) => f.source)).size} sources, ` +
+    `${e.company} · ${e.role} · ${scope}: median ₹${e.medianLpa}L from ${counted.length} figures across ${new Set(counted.map((f) => f.source)).size} sources, ` +
     `spread ₹${e.lowLpa}L to ₹${e.highLpa}L` +
     (floor ? ` · ${e.medianLpa! >= floor ? "clears" : "below"} the ₹${floor}L floor` : "");
-  return [head, "Crowd-sourced; check the role and years in each line before trusting it.", "source | figure | context | url", ...counted.slice(0, 12).map(fmt), ...tail].join("\n");
+  return [head, "Crowd-sourced; check the role and years in each line before trusting it.", "source | figure | city | context | url", ...counted.slice(0, 12).map(fmt), ...tail].join("\n");
 }

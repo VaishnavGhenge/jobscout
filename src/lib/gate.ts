@@ -32,6 +32,8 @@ export interface GateInput {
   yoe?: Yoe | null;
   /** Median from salary_lookup, in lakhs per year, when one is cached. */
   estimateLpa?: number | null;
+  /** Which figures that median came from: the job's city, or "India". */
+  estimateWhere?: string | null;
 }
 
 export interface GateVerdict {
@@ -52,7 +54,7 @@ export function payFloorLpa(): number | null {
 export function fitGate(j: GateInput): GateVerdict {
   const stated = parseComp(j.description);
   const statedLpa = stated?.currency === "INR" ? (stated.max ?? stated.min) / 100_000 : null;
-  const pay = stated?.label ?? (j.estimateLpa ? `est. ₹${j.estimateLpa}L` : null);
+  const pay = stated?.label ?? (j.estimateLpa ? `est. ₹${j.estimateLpa}L${j.estimateWhere ? ` ${j.estimateWhere}` : ""}` : null);
   const where = locationVerdict(j.location, j.description);
   const drop = (why: string): GateVerdict => ({ ok: false, why, where: where.label, pay });
 

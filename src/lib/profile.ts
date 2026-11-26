@@ -53,6 +53,14 @@ export const profile = {
    */
   requiredStack: ["python", "django", "fastapi", "flask", "go", "golang"],
 
+  /**
+   * Who posted a LinkedIn hiring post, as points on the post's score. A post
+   * from the employer's own recruiter or hiring manager is a direct line to the
+   * req; an agency post is one step removed, often for an unnamed client, and
+   * the same role turns up from five agencies at once. See tools/lib/posts.ts.
+   */
+  postSource: { "hiring-manager": 12, "in-house": 8, unknown: 0, agency: -6 },
+
   /** Titles outside the search even when the JD mentions Python somewhere. */
   roleScope: {
     excludeTitles: ["frontend", "front-end", "front end", "ui developer", "ui engineer", "react developer", "angular developer"],
@@ -286,6 +294,10 @@ export const profile = {
     avoid: [
       "intern",
       "internship",
+      /** Entry programmes: "Software Engineer – Trainee (0-1 yrs)" passed every other check. */
+      "trainee",
+      "fresher",
+      "freshers",
       "graduate",
       "new grad",
       "principal",

@@ -40,6 +40,28 @@ const REMOTE = /\bremote\b|work from home|\bwfh\b|fully distributed/i;
 const SPONSOR = /visa sponsorship|sponsor(s|ing)? (your |the |a )?(work )?visa|relocation (support|assistance|package|bonus)|we (will )?relocate|help(s)? (you )?relocate/i;
 const NO_SPONSOR = /no (visa )?sponsorship|(not|unable to|cannot|can't|do not|don't) (provide |offer )?(visa )?sponsor/i;
 
+/** Spellings that mean the same city, folded to one name. */
+const SAME_CITY: Record<string, string> = {
+  ...CITY_ALIASES, bengaluru: "bangalore", gurgaon: "gurugram", "new delhi": "delhi", ncr: "delhi",
+  cochin: "kochi", mysuru: "mysore", vizag: "visakhapatnam", thiruvananthapuram: "trivandrum",
+};
+const NOT_CITIES = new Set(["india", "pan india", "pan-india", "karnataka", "maharashtra", "telangana", "tamil nadu"]);
+
+/**
+ * The Indian city a location string or a line of text names, folded to one
+ * spelling ("Bengaluru East, Karnataka" -> "bangalore"), or null. First match
+ * in reading order wins.
+ */
+export function cityOf(text: string): string | null {
+  const names = [...INDIA.filter((c) => !NOT_CITIES.has(c)), ...Object.keys(CITY_ALIASES)];
+  let best: { at: number; name: string } | null = null;
+  for (const n of names) {
+    const m = new RegExp(`\\b${n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").exec(text);
+    if (m && (!best || m.index < best.at || (m.index === best.at && n.length > best.name.length))) best = { at: m.index, name: n };
+  }
+  return best ? (SAME_CITY[best.name.toLowerCase()] ?? best.name.toLowerCase()) : null;
+}
+
 const has = (hay: string, words: readonly string[]) =>
   words.some((w) => new RegExp(`\\b${w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(hay));
 

@@ -38,6 +38,7 @@ import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { isEngineeringRole } from "@/lib/scoring";
 import { dropKey, fitGate, payFloorLpa } from "@/lib/gate";
+import { cityOf } from "@/lib/location-pref";
 import {
   UA, decodeEntities, guestDetail, pool, score, searchLinkedIn, sleep,
 } from "../lib/linkedin";
@@ -640,7 +641,8 @@ const INSTRUCTIONS = `Job search policy (tuning lives in src/lib/profile.ts and 
 - Experience: the user has 3 years and can only apply where the stated minimum is 3 years or less. A "4+ years" ask is not worth listing. An unstated ask is fine.
 - Location: Pune, Mumbai, Bengaluru, Hyderabad, or remote open to India. Other Indian cities (Delhi NCR, Noida, Gurugram, Jaipur, Chandigarh, Chennai and so on) only when pay clears the floor, stated or from salary_lookup.
 - jobs_search and posts_search already apply these rules and report what they dropped. Cover the search with several narrow calls rather than one broad one: jobs_search for "python backend", "golang", "python full stack", "django", "fastapi", plus one with workplace ["remote"]; posts_search with roles like "python developer", "golang developer", "backend developer".
-- Pay: when a role you recommend states no pay, run salary_lookup for the company (a few per session, it uses Google in the user's browser). Report pay as a range with its source and sample, never one number presented as fact.
+- Pay: when a role you recommend states no pay, run salary_lookup with its jobId so the figures are for the job's city (a few per session, it uses Google in the user's browser). Report pay as a range with its source, city and sample, never one number presented as fact.
+- Posts: rank posts from the employer's own people first. posts_search tags each "via hiring-manager" (founder, CTO, engineering manager at the employer), "via in-house" (the employer's HR or company page) or "via agency" (recruiter placing another company's role, or "for our client"). Hiring-manager and in-house posts are the ones worth a same-day application and a direct message.
 - Always give a link per role: the LinkedIn job link from jobs_search, and for posts the post link plus the apply target.`;
 
 const server = new McpServer({ name: "apply", version: "0.1.0" }, { instructions: INSTRUCTIONS });
@@ -677,7 +679,8 @@ server.registerTool(
     const all = eng.map((c, i) => {
       const desc = details[i]?.description ?? "";
       const s = score(c.title, c.location, desc);
-      const g = fitGate({ title: c.title, location: c.location, description: desc, estimateLpa: cachedEstimate(c.company) });
+      const est = cachedEstimate(c.company, cityOf(c.location));
+      const g = fitGate({ title: c.title, location: c.location, description: desc, estimateLpa: est?.lpa, estimateWhere: est?.where });
       return { c, s, d: details[i], g };
     });
     const dropped = a.gate ? all.filter((r) => !r.g.ok) : [];
@@ -821,7 +824,7 @@ server.registerTool(
   "posts_search",
   {
     description:
-      "Find recruiter hiring posts on LinkedIn (where Google Form applications live) and return them triaged: one ranked line per post with role, company, location, years asked, apply route (google-form/ats/careers/email/dm) and fit score from profile.ts. Drops open-to-work posts, non-hiring posts, internships, big YOE gaps and locations outside profile.locations, and says how many. Give role phrases, not sentences: each becomes its own `\"hiring\" AND \"<role>\"` search, run sorted by latest and by relevance. Measured on LinkedIn: plain multi-word queries match any word (a motion designer for 'hiring python developer'), OR groups drop precision to ~67%, one narrow boolean query per role keeps it near 100%. Uses the logged-in browser, so keep it to a few calls a day.",
+      "Find recruiter hiring posts on LinkedIn (where Google Form applications live) and return them triaged: one ranked line per post with role, company, location, years asked, apply route (google-form/ats/careers/email/dm), who posted it (via hiring-manager, in-house or agency, scored +12, +8, -6), a post link, and fit score from profile.ts. Drops open-to-work posts, non-hiring posts, internships, big YOE gaps and locations outside profile.locations, and says how many. Give role phrases, not sentences: each becomes its own `\"hiring\" AND \"<role>\"` search, run sorted by latest and by relevance. Measured on LinkedIn: plain multi-word queries match any word (a motion designer for 'hiring python developer'), OR groups drop precision to ~67%, one narrow boolean query per role keeps it near 100%. Uses the logged-in browser, so keep it to a few calls a day.",
     inputSchema: {
       roles: z.array(z.string()).min(1).max(6).describe('role phrases, e.g. ["python developer", "backend developer", "django"]'),
       days: z.enum(["1", "7", "30"]).default("7"),
@@ -1108,15 +1111,25 @@ server.registerTool(
   "salary_lookup",
   {
     description:
-      "What a company pays for a role in India, from AmbitionBox, Glassdoor, Levels.fyi, 6figr, Naukri and Indeed: searches each through Google in the logged-in Chrome, reads pay figures from the results (and the AmbitionBox / Levels.fyi pages themselves when deep), and returns every figure with its source, the sentence it came from and the URL, plus a median across sources and whether it clears the PAY_OVERRIDE_LPA floor. Cached for 60 days, and jobs_search then shows the estimate next to that company's roles and uses it for the location override. About 4 Google searches per call, so a handful of companies per session.",
+      "What a company pays for a role in India, from AmbitionBox, Glassdoor, Levels.fyi, 6figr, Naukri and Indeed: searches each through Google in the logged-in Chrome, reads pay figures from the results (and the AmbitionBox / Levels.fyi pages themselves when deep), and returns every figure with its source, the sentence it came from and the URL, plus a median and whether it clears the PAY_OVERRIDE_LPA floor. Location-aware: pass jobId (company and city come from the posting) or city; figures naming another city are not counted, and the median uses only that city's figures when there are at least two, else India-wide, and says which. Figures for other titles, 7+ years, or 2.5x off the rest are listed but not counted. Cached per company and city for 60 days; jobs_search shows the estimate on matching rows and uses it for the location override. About 4 Google searches per call, so a handful of companies per session.",
     inputSchema: {
-      company: z.string(),
+      jobId: z.string().optional().describe("a LinkedIn jobId: company and city are taken from the posting"),
+      company: z.string().optional(),
       role: z.string().default("software engineer").describe("the title as these sites list it: 'software engineer', 'backend developer', 'sde 2'"),
-      city: z.string().optional(),
+      city: z.string().optional().describe("the job's city; figures for other cities are not counted"),
       deep: z.boolean().default(true).describe("also open the AmbitionBox and Levels.fyi pages"),
     },
   },
-  async ({ company, role, city, deep }) => {
+  async ({ jobId, company: co, role, city: at, deep }) => {
+    let company = co;
+    let city = at;
+    if (jobId) {
+      const d = await guestDetail(jobId);
+      company ??= d.company;
+      // "Pune Division, Maharashtra, India" -> "Pune": the sites title their pages by the plain city name.
+      city ??= cityOf(d.location) ? d.location.split(",")[0].replace(/\s+(Division|District|City|East|West|South|North|Metropolitan Region)$/i, "") : undefined;
+    }
+    if (!company) return text("Give a company or a jobId.");
     const read = async (url: string) => {
       const p = await tab("work");
       await p.goto(url, { waitUntil: "domcontentloaded" });

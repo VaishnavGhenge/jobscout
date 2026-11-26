@@ -27,6 +27,13 @@ export interface RawPost {
 
 export type ApplyKind = "google-form" | "ats" | "careers" | "email" | "dm" | "none";
 
+/**
+ * Who is behind the post. "hiring-manager": a founder, CTO or engineering
+ * manager at the employer. "in-house": the employer's own HR or the company
+ * page. "agency": a recruiter placing someone else's role.
+ */
+export type PostSource = "hiring-manager" | "in-house" | "agency" | "unknown";
+
 export interface TriagedPost {
   author: string;
   authorRole: string;
@@ -36,6 +43,9 @@ export interface TriagedPost {
   location: string;
   yoe: { min: number; max: number | null } | null;
   apply: { kind: ApplyKind; target: string | null };
+  source: PostSource;
+  /** The poster's own employer, from their headline or email domain. */
+  authorOrg: string | null;
   /** Stated in the post, when it is. */
   pay: string | null;
   score: number;
@@ -105,16 +115,56 @@ function parseRole(body: string): string {
   ).replace(/[\s|:–-]+$/, "");
 }
 
-function parseCompany(body: string, authorRole: string): string {
-  return (
+const stripLegal = (s: string) => s.replace(/\s*(?:pvt\.?|private)?\s*(?:ltd\.?|limited)?\s*$/i, "").trim();
+
+/** The employer named in the post body, or "" when it names none. */
+function parseCompany(body: string): string {
+  const c = stripLegal(
     firstMatch(body, [
       /(?:company|organi[sz]ation|client)\s*[:\-–]\s*([^\n|📍💼🏢⏳]{2,60})/i,
       /\b(?:at|join)\s+([A-Z][\w&.]*(?:\s+[A-Z][\w&.]*){0,4})(?=[\s,!.]|$)/,
       /([A-Z][\w&.]*(?:\s+[A-Z][\w&.]*){0,4})\s+is\s+(?:hiring|looking)/,
-    ]) ??
-    firstMatch(authorRole, [/@\s*([^|]+)/, /\bat\s+([^|]+)/]) ??
-    ""
-  ).replace(/\s*(?:pvt\.?|private)?\s*(?:ltd\.?|limited)?\s*$/i, "").trim();
+    ]) ?? "",
+  );
+  // "Hiring for our client: Backend Engineer (Python), Location: ..." puts the role where the name would be.
+  return /developer|engineer|location|experience|\byears?\b/i.test(c) ? "" : c;
+}
+
+/** Company pages render their name twice: "Sumfive Technologies Sumfive Technologies". */
+const once = (s: string) => s.replace(/^(.{3,}?)\s+\1$/, "$1");
+
+const AGENCY =
+  /for (?:one of )?our (?:esteemed |reputed |leading |valued )?clients?|on behalf of|client of ours|\bour client\b|staffing|placement|manpower|recruitment (?:agency|firm|services|partner)|talent solutions|hiring partner|\brpo\b|\bc2c\b|bench sales|consultancy|it consulting|headhunt/i;
+const MANAGER_ROLE =
+  /\b(cto|ceo|founder|co-?founder|vp,? engineering|head of (?:engineering|technology|tech)|engineering manager|director of engineering|tech(?:nical)? lead|team lead)\b/i;
+const FREEMAIL = /^(gmail|googlemail|yahoo|outlook|hotmail|rediffmail|icloud|proton|protonmail|live|ymail|aol)$/i;
+const ORG_NOISE = /\b(pvt|private|ltd|limited|inc|llp|llc|technologies|technology|tech|solutions|software|systems|labs?|india|global|group|services|consulting|the)\b/g;
+
+/** "4Labs Technologies Pvt Ltd" and "4labsinc.com" are the same org; "ApTask" and "Kinaxis" are not. */
+export function sameOrg(a: string, b: string): boolean {
+  const n = (s: string) => s.toLowerCase().replace(ORG_NOISE, " ").replace(/[^a-z0-9]+/g, " ").trim();
+  const [x, y] = [n(a), n(b)];
+  if (!x || !y) return false;
+  const [fx, fy] = [x.split(" ")[0], y.split(" ")[0]];
+  return x === y || (fx.length >= 3 && y.replace(/ /g, "").includes(fx)) || (fy.length >= 3 && x.replace(/ /g, "").includes(fy));
+}
+
+/** The poster's employer: "HR Recruiter @ 4Labs Technologies | MBA" -> "4Labs Technologies", else the email domain. */
+function authorOrgOf(author: string, authorRole: string, body: string): string | null {
+  const head = firstMatch(authorRole, [/@\s*([^|•,()]{2,50})/, /\bat\s+([A-Z0-9][^|•,()]{1,50})/]);
+  if (head) return stripLegal(head);
+  // A company page posts as itself: the "author" is the company and its "headline" repeats it.
+  if (author && authorRole && sameOrg(author, authorRole) && !/\b(hr|recruit|talent)/i.test(authorRole)) return author;
+  const domain = body.match(/[\w.+-]+@([\w-]+)\.[\w.-]+/)?.[1];
+  return domain && !FREEMAIL.test(domain) ? domain : null;
+}
+
+function classifySource(body: string, author: string, authorRole: string, employer: string, org: string | null): PostSource {
+  if (AGENCY.test(body) || AGENCY.test(authorRole)) return "agency";
+  if (employer && org && !sameOrg(employer, org)) return "agency";
+  const own = (employer && org && sameOrg(employer, org)) || (!employer && org && /\b(we(?:'re| are)|our (?:team|company)|join us)\b/i.test(body));
+  if (!own) return "unknown";
+  return MANAGER_ROLE.test(authorRole) && !sameOrg(author, org!) ? "hiring-manager" : "in-house";
 }
 
 function classifyApply(links: string[], body: string): { kind: ApplyKind; target: string | null } {
@@ -148,9 +198,16 @@ export interface TriageOptions {
 }
 
 export function triagePost(p: RawPost, o: TriageOptions = {}): TriagedPost {
-  const { author, authorRole, age, body } = splitHeader(p.text);
+  const h = splitHeader(p.text);
+  const { age, body } = h;
+  const author = once(h.author);
+  const authorRole = once(h.authorRole);
   const role = parseRole(body);
-  const company = parseCompany(body, authorRole);
+  const employer = parseCompany(body);
+  const authorOrg = authorOrgOf(author, authorRole, body);
+  const source = classifySource(body, author, authorRole, employer, authorOrg);
+  // An in-house post that names no employer is for the poster's own company.
+  const company = employer || (source === "in-house" || source === "hiring-manager" ? authorOrg ?? "" : "");
   const location = parseLocation(body);
   const yoe = parsePostYoe(body);
   const apply = classifyApply(p.links, body);
@@ -182,12 +239,14 @@ export function triagePost(p: RawPost, o: TriageOptions = {}): TriagedPost {
     age,
     role: role || "(role unclear)",
     company: company || "(company unclear)",
+    source,
+    authorOrg,
     location: gate.where,
     pay: gate.pay,
     yoe,
     apply,
-    score: s.score,
-    reasons: s.reasons,
+    score: Math.max(0, Math.min(100, s.score + profile.postSource[source])),
+    reasons: source === "unknown" ? s.reasons : [`via ${source}${authorOrg ? ` (${authorOrg})` : ""}`, ...s.reasons],
     drop,
     text: body,
     post: p.post,
