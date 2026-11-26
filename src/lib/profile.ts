@@ -40,6 +40,27 @@ export const profile = {
   yearsExperience: 3,
 
   /**
+   * The highest stated minimum you can apply against. "4+ years" screens you
+   * out on the form, so the MCP searches and the watcher drop it (lib/gate.ts).
+   * The board still shows it, ranked down by `yoeGap`.
+   */
+  maxYoeAsk: 3,
+
+  /**
+   * The search is Python or Go backend, or full stack where the backend is one
+   * of the two. lib/gate.ts drops a role when none of these appears in its
+   * title or JD.
+   */
+  requiredStack: ["python", "django", "fastapi", "flask", "go", "golang"],
+
+  /** Titles outside the search even when the JD mentions Python somewhere. */
+  roleScope: {
+    excludeTitles: ["frontend", "front-end", "front end", "ui developer", "ui engineer", "react developer", "angular developer"],
+    /** ...unless the title also says one of these. */
+    unlessTitle: ["backend", "back-end", "back end", "full stack", "fullstack", "full-stack"],
+  },
+
+  /**
    * Where you'd actually go. Separate from eligibility: a Noida role is one you
    * *can* be hired for, it just isn't one you want, and a Berlin role is one you
    * can't be hired for unless the post says it will sponsor you.
@@ -118,24 +139,14 @@ export const profile = {
   ],
 
   /**
-   * The part of `techKeywords` you get shortlisted on: Python, Go and Node.
-   * These carry the full stack weight. The rest of `techKeywords` (React,
+   * The part of `techKeywords` you get shortlisted on: Python and Go. These
+   * carry the full stack weight. The rest of `techKeywords` (Node, React,
    * Postgres, Kubernetes and so on) still counts, but at a fraction, so a
-   * "React Developer" role no longer ranks level with a "Golang Developer" one.
+   * "Node.js Developer" role no longer ranks level with a "Golang Developer" one.
    *
    * Every entry here must also be in `techKeywords`.
    */
-  primaryStack: [
-    "python",
-    "django",
-    "fastapi",
-    "flask",
-    "go",
-    "golang",
-    "node",
-    "nodejs",
-    "node.js",
-  ],
+  primaryStack: ["python", "django", "fastapi", "flask", "go", "golang"],
 
   /**
    * Stacks you don't work in, named in the title.

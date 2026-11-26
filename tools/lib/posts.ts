@@ -14,7 +14,7 @@
  */
 import { profile } from "@/lib/profile";
 import { isEngineeringRole, scoreJob } from "@/lib/scoring";
-import { locationVerdict } from "@/lib/location-pref";
+import { fitGate } from "@/lib/gate";
 import { LINKEDIN_COMPANY } from "./linkedin";
 
 export interface RawPost {
@@ -36,6 +36,8 @@ export interface TriagedPost {
   location: string;
   yoe: { min: number; max: number | null } | null;
   apply: { kind: ApplyKind; target: string | null };
+  /** Stated in the post, when it is. */
+  pay: string | null;
   score: number;
   reasons: string[];
   /** Why it was dropped, when it was. */
@@ -143,8 +145,6 @@ function splitHeader(text: string): { author: string; authorRole: string; age: s
 
 export interface TriageOptions {
   includeInternships?: boolean;
-  /** Keep roles asking for more than this many years above yours. */
-  maxYoeGap?: number;
 }
 
 export function triagePost(p: RawPost, o: TriageOptions = {}): TriagedPost {
@@ -156,16 +156,15 @@ export function triagePost(p: RawPost, o: TriageOptions = {}): TriagedPost {
   const apply = classifyApply(p.links, body);
 
   let drop: string | null = null;
-  const where = locationVerdict(location, body);
+  const gate = fitGate({ title: role || body.slice(0, 80), location, description: body, yoe });
   const indiaish = INDIA_PLACES.some((c) => new RegExp(`\\b${c}\\b`, "i").test(location)) || /remote/i.test(location);
   if (OPEN_TO_WORK.test(body) && !/we['’]?re hiring|we are hiring/i.test(body)) drop = "open-to-work post, not a role";
   else if (!HIRING.test(body)) drop = "not a hiring post";
   else if (profile.repostBlocklist.some((n) => `${author} ${company}`.toLowerCase().includes(n))) drop = "reposter, employer hidden";
   else if (role && !isEngineeringRole(role)) drop = `not an engineering role (${role.slice(0, 40)})`;
-  else if (!where.ok) drop = where.why;
   else if (/\b(indonesian|pakistani|uae nationals?|us citizens?) (candidates )?only\b/i.test(body)) drop = "restricted to another country's candidates";
   else if (!o.includeInternships && INTERN.test(`${role} ${body.slice(0, 200)}`)) drop = "internship";
-  else if (yoe && yoe.min - profile.yearsExperience > (o.maxYoeGap ?? 2)) drop = `asks ${yoe.min}+ years`;
+  else if (!gate.ok) drop = gate.why;
 
   const s = scoreJob(
     {
@@ -183,7 +182,8 @@ export function triagePost(p: RawPost, o: TriageOptions = {}): TriagedPost {
     age,
     role: role || "(role unclear)",
     company: company || "(company unclear)",
-    location: where.label,
+    location: gate.where,
+    pay: gate.pay,
     yoe,
     apply,
     score: s.score,
@@ -209,7 +209,7 @@ export function formatPost(p: TriagedPost, n: number, textChars: number): string
   const yoe = p.yoe ? `${p.yoe.min}${p.yoe.max != null && p.yoe.max !== p.yoe.min ? `-${p.yoe.max}` : "+"}y` : "?y";
   const apply = p.apply.target ? `${p.apply.kind} ${p.apply.target}` : p.apply.kind;
   const lines = [
-    `#${n} ${p.score} | ${p.role} | ${p.company} | ${p.location} | ${yoe} | ${p.age} | apply: ${apply}`,
+    `#${n} ${p.score} | ${p.role} | ${p.company} | ${p.location} | ${yoe}${p.pay ? ` | ${p.pay}` : ""} | ${p.age} | apply: ${apply}`,
     `   by ${p.author}${p.authorRole ? ` (${p.authorRole.slice(0, 60)})` : ""} | ${p.reasons.slice(0, 3).join("; ")}`,
   ];
   if (textChars > 0) lines.push(`   ${p.text.slice(0, textChars)}`);

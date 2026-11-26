@@ -37,6 +37,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { isEngineeringRole } from "@/lib/scoring";
+import { dropKey, fitGate, payFloorLpa } from "@/lib/gate";
 import {
   UA, decodeEntities, guestDetail, pool, score, searchLinkedIn, sleep,
 } from "../lib/linkedin";
@@ -45,6 +46,7 @@ import {
   DAILY_CAP, bingSearch, boardFit, discoverFit, formatFit, loadOutbox, outboxCheck, resolveDomain, saveOutbox, saveResearch, webContacts,
   type Contact, type Draft, type Searcher, type WebHit,
 } from "./outreach";
+import { cachedEstimate, formatEstimate, lookupSalary } from "./salary";
 
 const PORT = Number(process.env.APPLY_CDP_PORT ?? 9222);
 const PROFILE =
@@ -628,13 +630,26 @@ async function fillGeneric(p: Page, s: FormSession, file: string | null): Promis
 // ---------------------------------------------------------------------------
 // Server
 
-const server = new McpServer({ name: "apply", version: "0.1.0" });
+/**
+ * Sent to the client as server instructions, so every session searches the
+ * same way. Kept free of personal figures: the repo is public, and the pay
+ * floor lives in .env (PAY_OVERRIDE_LPA).
+ */
+const INSTRUCTIONS = `Job search policy (tuning lives in src/lib/profile.ts and src/lib/gate.ts):
+- Target: backend roles in Python or Go, or full stack where the backend is Python or Go. Not frontend-only, Java/.NET/PHP, mobile, data or QA roles.
+- Experience: the user has 3 years and can only apply where the stated minimum is 3 years or less. A "4+ years" ask is not worth listing. An unstated ask is fine.
+- Location: Pune, Mumbai, Bengaluru, Hyderabad, or remote open to India. Other Indian cities (Delhi NCR, Noida, Gurugram, Jaipur, Chandigarh, Chennai and so on) only when pay clears the floor, stated or from salary_lookup.
+- jobs_search and posts_search already apply these rules and report what they dropped. Cover the search with several narrow calls rather than one broad one: jobs_search for "python backend", "golang", "python full stack", "django", "fastapi", plus one with workplace ["remote"]; posts_search with roles like "python developer", "golang developer", "backend developer".
+- Pay: when a role you recommend states no pay, run salary_lookup for the company (a few per session, it uses Google in the user's browser). Report pay as a range with its source and sample, never one number presented as fact.
+- Always give a link per role: the LinkedIn job link from jobs_search, and for posts the post link plus the apply target.`;
+
+const server = new McpServer({ name: "apply", version: "0.1.0" }, { instructions: INSTRUCTIONS });
 
 server.registerTool(
   "jobs_search",
   {
     description:
-      "Search LinkedIn jobs and return them ranked by fit with the jobscout profile (stack, level, YOE ask, blockers). No browser needed. Returns jobId per row for job_detail.",
+      "Search LinkedIn jobs and return them ranked by fit with the jobscout profile (stack, level, YOE ask, blockers). Applies the fit gate first: drops roles asking more years than you can apply with, roles with no Python or Go, frontend-only titles, and locations outside your cities unless remote or paying above the floor; the header says how many went for each reason. Rows show stated pay, or a cached salary_lookup estimate marked est. No browser needed. Returns jobId and link per row.",
     inputSchema: {
       keywords: z.string(),
       location: z.string().default("India"),
@@ -644,6 +659,8 @@ server.registerTool(
       pages: z.number().int().min(1).max(5).default(2).describe("10 results per page"),
       limit: z.number().int().min(1).max(50).default(20),
       minScore: z.number().default(0),
+      gate: z.boolean().default(true).describe("false shows everything, ranked, with no drops"),
+      includeDropped: z.boolean().default(false),
     },
   },
   async (a) => {
@@ -657,22 +674,29 @@ server.registerTool(
     });
     const eng = cards.filter((c) => isEngineeringRole(c.title));
     const details = await pool(eng, 8, (c) => guestDetail(c.jobId).catch(() => null));
-    const rows = eng
-      .map((c, i) => {
-        const s = score(c.title, c.location, details[i]?.description ?? "");
-        return { c, s, d: details[i] };
-      })
-      .filter((r) => r.s.eligibility !== "blocked" && r.s.score >= a.minScore)
+    const all = eng.map((c, i) => {
+      const desc = details[i]?.description ?? "";
+      const s = score(c.title, c.location, desc);
+      const g = fitGate({ title: c.title, location: c.location, description: desc, estimateLpa: cachedEstimate(c.company) });
+      return { c, s, d: details[i], g };
+    });
+    const dropped = a.gate ? all.filter((r) => !r.g.ok) : [];
+    const why = new Map<string, number>();
+    for (const r of dropped) why.set(dropKey(r.g.why!), (why.get(dropKey(r.g.why!)) ?? 0) + 1);
+    const rows = all
+      .filter((r) => (!a.gate || r.g.ok) && r.s.eligibility !== "blocked" && r.s.score >= a.minScore)
       .sort((x, y) => y.s.score - x.s.score)
       .slice(0, a.limit);
     const yoe = (s: { yoeMin: number | null; yoeMax: number | null }) =>
       s.yoeMin == null ? "" : ` ${s.yoeMin}${s.yoeMax != null && s.yoeMax !== s.yoeMin ? `-${s.yoeMax}` : "+"}y`;
     const lines = rows.map(
-      ({ c, s, d }) =>
-        `${s.score} ${c.jobId} | ${c.title} | ${c.company} | ${c.location} | ${c.posted ?? ""}${yoe(s)}${d?.applicants ? ` | ${d.applicants}` : ""} | ${s.reasons.slice(0, 3).join("; ")}`,
+      ({ c, s, d, g }) =>
+        `${s.score} ${c.jobId} | ${c.title} | ${c.company} | ${g.where} | ${c.posted ?? ""}${yoe(s)} | ${g.pay ?? "pay ?"}${d?.applicants ? ` | ${d.applicants}` : ""} | ${s.reasons.slice(0, 3).join("; ")} | https://www.linkedin.com/jobs/view/${c.jobId}/`,
     );
+    if (a.includeDropped) lines.push("dropped:", ...dropped.map((r) => `- ${r.c.title} | ${r.c.company} | ${r.c.location}: ${r.g.why}`));
+    const gated = why.size ? `, ${dropped.length} gated out: ${[...why.entries()].sort((x, y) => y[1] - x[1]).map(([k, n]) => `${n} ${k}`).join(", ")}` : "";
     return text(
-      `${cards.length} found, ${cards.length - eng.length} non-engineering dropped, showing ${rows.length} by fit\nscore jobId | title | company | location | posted yoe | applicants | why\n${lines.join("\n")}`,
+      `${cards.length} found, ${cards.length - eng.length} non-engineering dropped${gated}, showing ${rows.length} by fit\nscore jobId | title | company | location | posted yoe | pay | applicants | why | link\n${lines.join("\n")}`,
     );
   },
 );
@@ -756,9 +780,35 @@ async function scrapePosts(
         return { t, post, links };
       });
   }, limit);
+  const clean = (t: string) => t.replace(/\s*(Like|Comment|Repost|Send)(\s+(Like|Comment|Repost|Send))*\s*$/, "");
+  // The search page carries no permalink or post id any more (checked Nov 2026:
+  // only an opaque componentkey). The post's own menu has "Copy link to post",
+  // so catch what it writes to the clipboard. One menu per post costs about a
+  // second, so only for posts that survive triage.
+  await p.evaluate(() => {
+    const w = window as unknown as { __copied: string[] };
+    w.__copied = [];
+    if (navigator.clipboard) navigator.clipboard.writeText = async (t: string) => void w.__copied.push(t);
+  });
+  const cards = p.locator("h2", { hasText: /^\s*Feed post\s*$/ });
+  for (let i = 0; i < raw.length; i++) {
+    if (raw[i].post || triagePost({ text: clean(raw[i].t), links: [], post: null }).drop) continue;
+    try {
+      const n = await p.evaluate(() => (window as unknown as { __copied: string[] }).__copied.length);
+      await cards.nth(i).locator("xpath=..").locator('button[aria-label^="Open control menu"]').first().click({ timeout: 3000 });
+      await p.getByText(/^\s*copy link to post\s*$/i).first().click({ timeout: 3000 });
+      await p
+        .waitForFunction((k) => (window as unknown as { __copied: string[] }).__copied.length > k, n, { timeout: 2000 })
+        .catch(() => {});
+      raw[i].post = await p.evaluate((k) => (window as unknown as { __copied: string[] }).__copied[k] ?? null, n);
+    } catch {
+      // No link is a missing column, not a failed search.
+    }
+    await p.keyboard.press("Escape").catch(() => {});
+  }
   return Promise.all(
     raw.map(async (x) => ({
-      text: x.t.replace(/\s*(Like|Comment|Repost|Send)(\s+(Like|Comment|Repost|Send))*\s*$/, ""),
+      text: clean(x.t),
       post: x.post,
       links: (await Promise.all(x.links.slice(0, 4).map((l) => resolveShort(l).catch(() => l)))).filter(
         (l) => !/licdn\.com|linkedin\.com\/(in|company)\//.test(l),
@@ -1051,6 +1101,31 @@ server.registerTool(
     const lines = all.map((f, i) => formatFit(f, i + 1, days) + (emailed.has(f.company.toLowerCase()) ? "\n   (already emailed)" : ""));
     const head = `${board instanceof Error ? `board unavailable: ${board.message}` : `${board.length} board companies`}, ${found.length} discovered · fit | company | kind | roles | trend | stack | cities`;
     return text(`${head}\n${lines.join("\n")}`);
+  },
+);
+
+server.registerTool(
+  "salary_lookup",
+  {
+    description:
+      "What a company pays for a role in India, from AmbitionBox, Glassdoor, Levels.fyi, 6figr, Naukri and Indeed: searches each through Google in the logged-in Chrome, reads pay figures from the results (and the AmbitionBox / Levels.fyi pages themselves when deep), and returns every figure with its source, the sentence it came from and the URL, plus a median across sources and whether it clears the PAY_OVERRIDE_LPA floor. Cached for 60 days, and jobs_search then shows the estimate next to that company's roles and uses it for the location override. About 4 Google searches per call, so a handful of companies per session.",
+    inputSchema: {
+      company: z.string(),
+      role: z.string().default("software engineer").describe("the title as these sites list it: 'software engineer', 'backend developer', 'sde 2'"),
+      city: z.string().optional(),
+      deep: z.boolean().default(true).describe("also open the AmbitionBox and Levels.fyi pages"),
+    },
+  },
+  async ({ company, role, city, deep }) => {
+    const read = async (url: string) => {
+      const p = await tab("work");
+      await p.goto(url, { waitUntil: "domcontentloaded" });
+      await p.waitForLoadState("load", { timeout: 8000 }).catch(() => {});
+      await sleep(800);
+      return p.evaluate(() => document.body.innerText);
+    };
+    const e = await lookupSalary(company, role, city, webSearch, deep ? read : null);
+    return text(formatEstimate(e, payFloorLpa()));
   },
 );
 

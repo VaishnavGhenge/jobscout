@@ -59,6 +59,9 @@ export function locationVerdict(location: string, text = ""): LocationVerdict {
   }
 
   if (!loc) return { ok: true, label: "location unstated", why: null };
+  // LinkedIn writes "India" when the employer picked the country and no city:
+  // usually remote or several offices. Unknown, so kept.
+  if (/^(pan[- ]?)?india$/i.test(loc)) return { ok: true, label: "India, city unstated", why: null };
   if (has(loc, pref.cities) || has(loc, Object.keys(CITY_ALIASES))) return { ok: true, label: loc, why: null };
   if (has(loc, INDIA)) {
     return { ok: false, label: loc, why: `on-site in ${loc}, not one of your cities` };
