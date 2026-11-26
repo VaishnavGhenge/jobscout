@@ -39,6 +39,7 @@ import { basename, join, resolve } from "node:path";
 import { isEngineeringRole } from "@/lib/scoring";
 import { dropKey, fitGate, payFloorLpa } from "@/lib/gate";
 import { cityOf } from "@/lib/location-pref";
+import { applyRoute, competition, noticeAsk } from "@/lib/signals";
 import {
   UA, decodeEntities, guestDetail, pool, score, searchLinkedIn, sleep,
 } from "../lib/linkedin";
@@ -651,7 +652,7 @@ server.registerTool(
   "jobs_search",
   {
     description:
-      "Search LinkedIn jobs and return them ranked by fit with the jobscout profile (stack, level, YOE ask, blockers). Applies the fit gate first: drops roles asking more years than you can apply with, roles with no Python or Go, frontend-only titles, and locations outside your cities unless remote or paying above the floor; the header says how many went for each reason. Rows show stated pay, or a cached salary_lookup estimate marked est. No browser needed. Returns jobId and link per row.",
+      "Search LinkedIn jobs and return them ranked by fit with the jobscout profile (stack, level, YOE ask, blockers). Applies the fit gate first: drops roles asking more years than you can apply with, roles with no Python or Go, frontend-only titles, and locations outside your cities unless remote or paying above the floor; the header says how many went for each reason. Ranked by fit plus crowding (applicant count, posted <24h; weights in profile.competition). Rows show stated pay or a cached salary_lookup estimate marked est., and NOTICE: when the JD wants a shorter notice than NOTICE_DAYS (flagged, not dropped). No browser needed. Returns jobId and link per row.",
     inputSchema: {
       keywords: z.string(),
       location: z.string().default("India"),
@@ -681,25 +682,29 @@ server.registerTool(
       const s = score(c.title, c.location, desc);
       const est = cachedEstimate(c.company, cityOf(c.location));
       const g = fitGate({ title: c.title, location: c.location, description: desc, estimateLpa: est?.lpa, estimateWhere: est?.where });
-      return { c, s, d: details[i], g };
+      // Rank = fit + crowding. Fit alone put a 200+ applicant role above a day-old one with 30.
+      const crowd = competition(details[i]?.applicants, details[i]?.postedAgo);
+      const notice = noticeAsk(`${c.title}\n${desc}`);
+      return { c, s, d: details[i], g, crowd, notice, rank: s.score + crowd.points };
     });
     const dropped = a.gate ? all.filter((r) => !r.g.ok) : [];
     const why = new Map<string, number>();
     for (const r of dropped) why.set(dropKey(r.g.why!), (why.get(dropKey(r.g.why!)) ?? 0) + 1);
     const rows = all
       .filter((r) => (!a.gate || r.g.ok) && r.s.eligibility !== "blocked" && r.s.score >= a.minScore)
-      .sort((x, y) => y.s.score - x.s.score)
+      .sort((x, y) => y.rank - x.rank)
       .slice(0, a.limit);
     const yoe = (s: { yoeMin: number | null; yoeMax: number | null }) =>
       s.yoeMin == null ? "" : ` ${s.yoeMin}${s.yoeMax != null && s.yoeMax !== s.yoeMin ? `-${s.yoeMax}` : "+"}y`;
     const lines = rows.map(
-      ({ c, s, d, g }) =>
-        `${s.score} ${c.jobId} | ${c.title} | ${c.company} | ${g.where} | ${c.posted ?? ""}${yoe(s)} | ${g.pay ?? "pay ?"}${d?.applicants ? ` | ${d.applicants}` : ""} | ${s.reasons.slice(0, 3).join("; ")} | https://www.linkedin.com/jobs/view/${c.jobId}/`,
+      ({ c, s, d, g, crowd, notice, rank }) =>
+        `${rank} ${c.jobId} | ${c.title} | ${c.company} | ${g.where} | ${d?.postedAgo ?? c.posted ?? ""}${yoe(s)} | ${g.pay ?? "pay ?"}${d?.applicants ? ` | ${d.applicants}` : ""}` +
+        ` | ${[notice?.short ? `NOTICE: ${notice.label}` : null, crowd.label, ...s.reasons.slice(0, 3)].filter(Boolean).join("; ")} | https://www.linkedin.com/jobs/view/${c.jobId}/`,
     );
     if (a.includeDropped) lines.push("dropped:", ...dropped.map((r) => `- ${r.c.title} | ${r.c.company} | ${r.c.location}: ${r.g.why}`));
     const gated = why.size ? `, ${dropped.length} gated out: ${[...why.entries()].sort((x, y) => y[1] - x[1]).map(([k, n]) => `${n} ${k}`).join(", ")}` : "";
     return text(
-      `${cards.length} found, ${cards.length - eng.length} non-engineering dropped${gated}, showing ${rows.length} by fit\nscore jobId | title | company | location | posted yoe | pay | applicants | why | link\n${lines.join("\n")}`,
+      `${cards.length} found, ${cards.length - eng.length} non-engineering dropped${gated}, showing ${rows.length} by fit + crowding\nrank jobId | title | company | location | posted yoe | pay | applicants | why | link\n${lines.join("\n")}`,
     );
   },
 );

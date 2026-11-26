@@ -61,6 +61,28 @@ export const profile = {
    */
   postSource: { "hiring-manager": 12, "in-house": 8, unknown: 0, agency: -6 },
 
+  /**
+   * Crowding, added to the fit score in jobs_search and posts_search (see
+   * lib/signals.ts). Tiers by applicant count, tried in order. LinkedIn caps
+   * the count at "Over 200", so the last tier is everything past that.
+   */
+  competition: {
+    applicants: [
+      { max: 24, points: 8, label: "<25 applicants" },
+      { max: 50, points: 5, label: "<50 applicants" },
+      { max: 100, points: 2, label: null },
+      { max: 199, points: 0, label: null },
+      { max: Infinity, points: -6, label: "200+ applicants" },
+    ],
+    fresh: { hours: 24, points: 4, label: "posted <24h" },
+  },
+
+  /**
+   * How a post says to apply. A form, an email or a DM reaches a person who
+   * reads it; a careers link is an ATS queue; no route means hunting for one.
+   */
+  applyRoute: { "google-form": 5, email: 5, dm: 4, ats: 2, careers: 1, none: -4 },
+
   /** Titles outside the search even when the JD mentions Python somewhere. */
   roleScope: {
     excludeTitles: ["frontend", "front-end", "front end", "ui developer", "ui engineer", "react developer", "angular developer"],

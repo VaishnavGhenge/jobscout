@@ -15,6 +15,7 @@
 import { profile } from "@/lib/profile";
 import { isEngineeringRole, scoreJob } from "@/lib/scoring";
 import { fitGate } from "@/lib/gate";
+import { applyRoute, competition, noticeAsk, type NoticeAsk } from "@/lib/signals";
 import { LINKEDIN_COMPANY } from "./linkedin";
 
 export interface RawPost {
@@ -46,6 +47,8 @@ export interface TriagedPost {
   source: PostSource;
   /** The poster's own employer, from their headline or email domain. */
   authorOrg: string | null;
+  /** The notice the post wants, when it says. */
+  notice: NoticeAsk | null;
   /** Stated in the post, when it is. */
   pay: string | null;
   score: number;
@@ -211,6 +214,9 @@ export function triagePost(p: RawPost, o: TriageOptions = {}): TriagedPost {
   const location = parseLocation(body);
   const yoe = parsePostYoe(body);
   const apply = classifyApply(p.links, body);
+  const route = applyRoute(apply.kind);
+  const fresh = competition(null, age);
+  const notice = noticeAsk(body);
 
   let drop: string | null = null;
   const gate = fitGate({ title: role || body.slice(0, 80), location, description: body, yoe });
@@ -245,8 +251,16 @@ export function triagePost(p: RawPost, o: TriageOptions = {}): TriagedPost {
     pay: gate.pay,
     yoe,
     apply,
-    score: Math.max(0, Math.min(100, s.score + profile.postSource[source])),
-    reasons: source === "unknown" ? s.reasons : [`via ${source}${authorOrg ? ` (${authorOrg})` : ""}`, ...s.reasons],
+    // Posts carry no applicant count, so crowding is age alone. Not clamped at
+    // 100: it's a rank, and a capped score would tie the best posts together.
+    score: Math.max(0, s.score + profile.postSource[source] + route.points + fresh.points),
+    reasons: [
+      notice?.short ? `NOTICE: ${notice.label}` : null,
+      source === "unknown" ? null : `via ${source}${authorOrg ? ` (${authorOrg})` : ""}`,
+      fresh.label,
+      ...s.reasons,
+    ].filter((r): r is string => !!r),
+    notice,
     drop,
     text: body,
     post: p.post,
