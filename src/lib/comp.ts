@@ -101,6 +101,19 @@ const PER_UNIT_RE = /\/\s*(hour|hr|day|month|mo)\b|per\s+(hour|hour|day|month)\b
 const SALARY_CONTEXT_RE =
   /\b(salar(?:y|ies)|compensation|remuneration|\bctc\b|base pay|base salary|pay range|pay band|total rewards|package|per annum|annually|annual|takehome|take-home|pays?|paid|earn)\b/i;
 
+/**
+ * "~60Lac customers trust us" parses exactly like "60 LPA". A lakh figure
+ * followed by what it counts (customers, users, downloads) is a headcount,
+ * not pay; Nat Habit's "60Lac customers" got a Gurugram role through the
+ * location filter as a ₹60L offer.
+ */
+const COUNT_NOUN_RE =
+  /^\s*\+?\s*(?:happy\s+|active\s+|registered\s+|monthly\s+)?(customers?|users?|downloads?|installs?|people|families|households|orders|farmers|consumers|patients|students|members|subscribers|followers|views|visitors|transactions|merchants|sellers|businesses|units|products|sq\.?\s*ft|square feet|kms?)\b/i;
+
+function isCount(text: string, index: number, matchLength: number): boolean {
+  return COUNT_NOUN_RE.test(text.slice(index + matchLength, index + matchLength + 40));
+}
+
 function hasSalaryContext(text: string, index: number, matchLength: number): boolean {
   const before = text.slice(Math.max(0, index - 140), index);
   const after = text.slice(index + matchLength, index + matchLength + 60);
@@ -138,7 +151,7 @@ export function parseComp(description: string): Comp | null {
   const text = description.slice(0, 20_000);
 
   const lpaRange = LPA_RANGE_RE.exec(text);
-  if (lpaRange && !PER_UNIT_RE.test(around(text, lpaRange.index))) {
+  if (lpaRange && !PER_UNIT_RE.test(around(text, lpaRange.index)) && !isCount(text, lpaRange.index, lpaRange[0].length)) {
     const scale = scaleOf(lpaRange[3]);
     const min = toNumber(lpaRange[1], scale);
     const max = toNumber(lpaRange[2], scale);
@@ -160,8 +173,15 @@ export function parseComp(description: string): Comp | null {
       return build(currency, min, max);
   }
 
+  // A lone "N lakh" needs a pay word nearby: unlike a range, it's as often a
+  // count or a funding figure as a salary.
   const lpaSingle = LPA_SINGLE_RE.exec(text);
-  if (lpaSingle && !PER_UNIT_RE.test(around(text, lpaSingle.index))) {
+  if (
+    lpaSingle &&
+    !PER_UNIT_RE.test(around(text, lpaSingle.index)) &&
+    !isCount(text, lpaSingle.index, lpaSingle[0].length) &&
+    (/lpa/i.test(lpaSingle[2]) || hasSalaryContext(text, lpaSingle.index, lpaSingle[0].length))
+  ) {
     const min = toNumber(lpaSingle[1], scaleOf(lpaSingle[2]));
     if (min && min >= ANNUAL_FLOOR.INR) return build("INR", min, null);
   }

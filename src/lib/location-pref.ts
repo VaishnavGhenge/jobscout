@@ -31,9 +31,13 @@ const CITY_ALIASES: Record<string, string> = {
   goregaon: "mumbai", vikhroli: "mumbai", thane: "mumbai", "navi mumbai": "mumbai",
   pimpri: "pune", chinchwad: "pune", hinjewadi: "pune", kharadi: "pune", baner: "pune", magarpatta: "pune",
 };
-/** Places that are clearly not India. Anything else unrecognised counts as unknown and is kept. */
-const ABROAD =
-  /\b(jakarta|indonesia|lahore|karachi|islamabad|pakistan|dhaka|bangladesh|uae|dubai|abu dhabi|saudi|riyadh|qatar|doha|singapore|malaysia|philippines|manila|nigeria|lagos|kenya|nairobi|usa|united states|canada|toronto|uk|united kingdom|england|scotland|wales|ireland|dublin|london|manchester|birmingham|sussex|surrey|kent|germany|berlin|netherlands|amsterdam|australia|sydney|vietnam|egypt|cairo|giza|alexandria|smart village|nepal|sri lanka|jersey|texas|california|new york)\b/i;
+/**
+ * Places that are clearly not India. Anything else unrecognised counts as
+ * unknown and is kept. Countries first, so a post that names only the country
+ * ("Dar es Salaam, Tanzania") is caught without its city being listed.
+ */
+export const ABROAD =
+  /\b(afghanistan|albania|algeria|argentina|armenia|austria|azerbaijan|bahrain|belarus|belgium|bhutan|bolivia|bosnia|botswana|brazil|bulgaria|cambodia|cameroon|chile|china|colombia|costa rica|croatia|cyprus|czech|czechia|denmark|ecuador|estonia|ethiopia|finland|france|ghana|greece|guatemala|hong kong|hungary|iceland|iran|iraq|israel|italy|ivory coast|jamaica|japan|kazakhstan|korea|kuwait|kyrgyzstan|laos|latvia|lebanon|lithuania|luxembourg|madagascar|malawi|maldives|malta|mauritius|mexico|moldova|mongolia|morocco|mozambique|myanmar|namibia|new zealand|norway|oman|panama|paraguay|peru|poland|portugal|romania|russia|rwanda|senegal|serbia|slovakia|slovenia|south africa|spain|sweden|switzerland|taiwan|tajikistan|tanzania|thailand|tunisia|turkey|t[uü]rkiye|uganda|ukraine|uruguay|uzbekistan|venezuela|yemen|zambia|zimbabwe|dar es salaam|kampala|accra|addis ababa|johannesburg|cape town|tokyo|seoul|shanghai|beijing|bangkok|kuala lumpur|ho chi minh|hanoi|lisbon|madrid|barcelona|paris|warsaw|krakow|prague|vienna|zurich|stockholm|copenhagen|oslo|helsinki|munich|hamburg|frankfurt|milan|rome|athens|istanbul|tel aviv|melbourne|auckland|vancouver|montreal|mexico city|sao paulo|buenos aires|bogota|santiago|jakarta|indonesia|lahore|karachi|islamabad|pakistan|dhaka|bangladesh|uae|dubai|abu dhabi|saudi|riyadh|qatar|doha|singapore|malaysia|philippines|manila|nigeria|lagos|kenya|nairobi|usa|united states|canada|toronto|uk|united kingdom|england|scotland|wales|ireland|dublin|london|manchester|birmingham|sussex|surrey|kent|germany|berlin|netherlands|amsterdam|australia|sydney|vietnam|egypt|cairo|giza|alexandria|smart village|nepal|sri lanka|jersey|texas|california|new york)\b/i;
 const US = /\b(us|usa|united states|u\.s\.?|americas?|north america)\b/i;
 const ANYWHERE = /\b(anywhere|worldwide|global(ly)?|any location|fully distributed)\b/i;
 const REMOTE = /\bremote\b|work from home|\bwfh\b|fully distributed/i;

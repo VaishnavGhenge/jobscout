@@ -83,6 +83,9 @@ export const profile = {
    */
   applyRoute: { "google-form": 5, email: 5, dm: 4, ats: 2, careers: 1, none: -4 },
 
+  /** Rank change when a salary estimate is below your current pay (CURRENT_CTC_LPA in .env). */
+  belowCurrentPay: { points: -10, label: "est. pay below your current" },
+
   /** Titles outside the search even when the JD mentions Python somewhere. */
   roleScope: {
     excludeTitles: ["frontend", "front-end", "front end", "ui developer", "ui engineer", "react developer", "angular developer"],
@@ -328,6 +331,8 @@ export const profile = {
       "director",
       "vp",
       "vice president",
+      /** Bank rank: "Python Developer, AVP" at Deutsche Bank is 5-8 years, not a developer grade. */
+      "avp",
       "head of",
       "manager",
       "lead",

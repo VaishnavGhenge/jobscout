@@ -15,6 +15,7 @@
 import { profile } from "@/lib/profile";
 import { isEngineeringRole, scoreJob } from "@/lib/scoring";
 import { fitGate } from "@/lib/gate";
+import { ABROAD } from "@/lib/location-pref";
 import { applyRoute, competition, noticeAsk, type NoticeAsk } from "@/lib/signals";
 import { LINKEDIN_COMPANY } from "./linkedin";
 
@@ -72,8 +73,6 @@ const INDIA_PLACES = [
   "bhubaneswar", "lucknow", "vadodara", "surat", "mysore", "mysuru", "visakhapatnam", "vizag", "india",
   "pan india", "pan-india",
 ];
-const ABROAD =
-  /\b(jakarta|indonesia|lahore|karachi|islamabad|pakistan|dhaka|bangladesh|uae|dubai|abu dhabi|saudi|riyadh|qatar|doha|singapore|malaysia|philippines|manila|nigeria|lagos|kenya|nairobi|usa|united states|canada|toronto|uk|london|germany|berlin|netherlands|amsterdam|australia|sydney|vietnam|egypt|cairo|nepal|sri lanka)\b/i;
 const REMOTE = /\bremote\b|work from home|\bwfh\b/i;
 
 function firstMatch(text: string, res: RegExp[]): string | null {
@@ -125,7 +124,7 @@ function parseCompany(body: string): string {
   const c = stripLegal(
     firstMatch(body, [
       /(?:company|organi[sz]ation|client)\s*[:\-–]\s*([^\n|📍💼🏢⏳]{2,60})/i,
-      /\b(?:at|join)\s+([A-Z][\w&.]*(?:\s+[A-Z][\w&.]*){0,4})(?=[\s,!.]|$)/,
+      /\b(?:at|join)\s+([A-Z][\w&.]*(?:\s+[A-Z][\w&.]*){0,4})(?=[\s,!.:;|)]|$)/,
       /([A-Z][\w&.]*(?:\s+[A-Z][\w&.]*){0,4})\s+is\s+(?:hiring|looking)/,
     ]) ?? "",
   );
@@ -152,19 +151,30 @@ export function sameOrg(a: string, b: string): boolean {
   return x === y || (fx.length >= 3 && y.replace(/ /g, "").includes(fx)) || (fy.length >= 3 && x.replace(/ /g, "").includes(fy));
 }
 
-/** The poster's employer: "HR Recruiter @ 4Labs Technologies | MBA" -> "4Labs Technologies", else the email domain. */
-function authorOrgOf(author: string, authorRole: string, body: string): string | null {
-  const head = firstMatch(authorRole, [/@\s*([^|•,()]{2,50})/, /\bat\s+([A-Z0-9][^|•,()]{1,50})/]);
-  if (head) return stripLegal(head);
-  // A company page posts as itself: the "author" is the company and its "headline" repeats it.
-  if (author && authorRole && sameOrg(author, authorRole) && !/\b(hr|recruit|talent)/i.test(authorRole)) return author;
-  const domain = body.match(/[\w.+-]+@([\w-]+)\.[\w.-]+/)?.[1];
-  return domain && !FREEMAIL.test(domain) ? domain : null;
+interface AuthorOrg {
+  org: string;
+  /** Where it came from. An email domain alone is weak: recruiting firms mail from their own domain too. */
+  from: "headline" | "page" | "email";
 }
 
-function classifySource(body: string, author: string, authorRole: string, employer: string, org: string | null): PostSource {
-  if (AGENCY.test(body) || AGENCY.test(authorRole)) return "agency";
+/** The poster's employer: "HR Recruiter @ 4Labs Technologies | MBA" -> "4Labs Technologies", else the email domain. */
+function authorOrgOf(author: string, authorRole: string, body: string): AuthorOrg | null {
+  const head = firstMatch(authorRole, [/@\s*([^|•,()]{2,50})/, /\bat\s+([A-Z0-9][^|•,()]{1,50})/]);
+  if (head) return { org: stripLegal(head), from: "headline" };
+  // A company page posts as itself: the "author" is the company and its "headline" repeats it.
+  if (author && authorRole && sameOrg(author, authorRole) && !/\b(hr|recruit|talent)/i.test(authorRole)) return { org: author, from: "page" };
+  const domain = body.match(/[\w.+-]+@([\w-]+)\.[\w.-]+/)?.[1];
+  return domain && !FREEMAIL.test(domain) ? { org: domain, from: "email" } : null;
+}
+
+function classifySource(body: string, author: string, authorRole: string, employer: string, a: AuthorOrg | null): PostSource {
+  // The display name counts too: "US Bench Sales Recruiter-C2C Requirements J Rao" put it there, not in the headline.
+  if (AGENCY.test(body) || AGENCY.test(authorRole) || AGENCY.test(author)) return "agency";
+  const org = a?.org ?? null;
   if (employer && org && !sameOrg(employer, org)) return "agency";
+  // An email domain proves the employer only when the post names that employer. Otherwise
+  // it's as likely a recruiting firm's domain (inkitsolutions, ba-itconsult) as the employer's.
+  if (a?.from === "email" && !(employer && sameOrg(employer, a.org))) return "unknown";
   const own = (employer && org && sameOrg(employer, org)) || (!employer && org && /\b(we(?:'re| are)|our (?:team|company)|join us)\b/i.test(body));
   if (!own) return "unknown";
   return MANAGER_ROLE.test(authorRole) && !sameOrg(author, org!) ? "hiring-manager" : "in-house";
@@ -207,8 +217,9 @@ export function triagePost(p: RawPost, o: TriageOptions = {}): TriagedPost {
   const authorRole = once(h.authorRole);
   const role = parseRole(body);
   const employer = parseCompany(body);
-  const authorOrg = authorOrgOf(author, authorRole, body);
-  const source = classifySource(body, author, authorRole, employer, authorOrg);
+  const byAuthor = authorOrgOf(author, authorRole, body);
+  const authorOrg = byAuthor?.org ?? null;
+  const source = classifySource(body, author, authorRole, employer, byAuthor);
   // An in-house post that names no employer is for the poster's own company.
   const company = employer || (source === "in-house" || source === "hiring-manager" ? authorOrg ?? "" : "");
   const location = parseLocation(body);

@@ -172,6 +172,8 @@ export async function lookupSalary(
   cityName: string | undefined,
   search: Searcher,
   read: ((url: string) => Promise<string>) | null,
+  /** "fast": AmbitionBox and Glassdoor only, for the lookups a search runs on every row. */
+  mode: "fast" | "full" = "full",
 ): Promise<Estimate> {
   const c = `"${company}"`;
   const city = cityName ? cityOf(cityName) ?? cityName.toLowerCase() : null;
@@ -182,20 +184,55 @@ export async function lookupSalary(
     `${c} ${role} salary${where} site:glassdoor.co.in`,
     `${c} software engineer salary${where} site:levels.fyi`,
     `${c} ${role} salary${where} LPA 6figr OR naukri OR indeed`,
-  ];
+  ].slice(0, mode === "fast" ? 2 : 4);
   const figures: Figure[] = [];
   const pages = new Map<string, string>();
-  const co = company.toLowerCase().split(/\s+/)[0];
+  // Match on the whole distinctive name, not its first word: "AI Accountant"
+  // matched every page containing "ai" and came back at 7.5L against 16L.
+  const NOISE = /\b(pvt|private|ltd|limited|inc|llp|llc|technologies|technology|solutions|software|systems|services|india|integrated|global|group|consulting|enterprise|the|co)\b/g;
+  const flat = (x: string) => x.toLowerCase().replace(/\([^)]*\)/g, " ").replace(/[^a-z0-9]+/g, " ");
+  const core = flat(company).replace(NOISE, " ").replace(/\s+/g, " ").trim() || flat(company).trim();
+  // A search that throws (browser gone, Google blocking) is not "no data": if
+  // every query failed, throw so the caller reports it and nothing is cached.
+  // Swallowing it cached a week of false "no salary data found" on Nov 26.
+  let failures = 0;
+  let lastError = "";
   for (const q of queries) {
-    const hits = await search(q, 8).catch(() => []);
+    const hits = await search(q, 8).catch((e: Error) => {
+      failures++;
+      lastError = e.message.split("\n")[0].slice(0, 120);
+      return [];
+    });
+    // When Google blocks us the searcher falls back to Bing, which ignores
+    // site: and returns the company's homepage and Wikipedia. Hold it to the
+    // site the query asked for.
+    const site = q.match(/site:(\S+)/)?.[1];
     for (const h of hits) {
+      if (site && !h.url.includes(site)) continue;
       // A page about another company with a similar name is worse than nothing.
-      if (!`${h.title} ${h.url}`.toLowerCase().includes(co)) continue;
+      if (!` ${flat(`${h.title} ${h.url}`)} `.includes(` ${core} `)) continue;
       const src = sourceOf(h.url);
       figures.push(...extractFigures(`${h.title}. ${h.snippet}`, src, h.url));
       if ((src === "AmbitionBox" || src === "Levels.fyi") && !pages.has(src) && /salar/i.test(h.url)) pages.set(src, h.url);
     }
   }
+  // Search found nothing (blocked, or no snippet carried a figure): AmbitionBox
+  // salary pages sit at a predictable URL, so read them straight from Chrome.
+  if (read && !figures.length) {
+    const slug = core.replace(/ /g, "-");
+    const amb = { bangalore: "bengaluru", gurugram: "gurgaon" } as Record<string, string>;
+    const loc = city ? `/${amb[city] ?? city}-location` : "";
+    const direct = [`https://www.ambitionbox.com/salaries/${slug}-salaries/software-engineer${loc}`, `https://www.ambitionbox.com/salaries/${slug}-salaries/software-engineer`];
+    for (const url of loc ? direct : direct.slice(1)) {
+      const body = await read(url).catch(() => "");
+      if (!body || /page not found|404|no salaries/i.test(body.slice(0, 600))) continue;
+      const lines = body.split("\n").filter((l) => /₹/.test(l) && /salar|ctc|l\/yr|lpa|range|average/i.test(l));
+      figures.push(...extractFigures(lines.slice(0, 40).join("\n"), "AmbitionBox", url).map((f) => ({ ...f, page: true })));
+      if (figures.length) break;
+    }
+    pages.delete("AmbitionBox");
+  }
+  if (failures === queries.length && !figures.length) throw new Error(`salary search failed: ${lastError}`);
   if (read) {
     for (const [src, url] of pages) {
       const body = await read(url).catch(() => "");
@@ -252,7 +289,9 @@ export async function lookupSalary(
     highLpa: counted.length ? Math.max(...counted.map((f) => f.high)) : null,
     figures: uniq,
   };
-  if (uniq.length) saveEstimate(est);
+  // Saved even when empty, so a search doesn't look the same company up again
+  // for every row and every query; `searched` says it was tried.
+  saveEstimate(est);
   return est;
 }
 
@@ -275,7 +314,10 @@ const key = (company: string, city: string | null) =>
 
 function saveEstimate(e: Estimate): void {
   const all = loadAll();
-  all[key(e.company, e.scope === "city" ? e.city : null)] = e;
+  const k = key(e.company, e.scope === "city" ? e.city : null);
+  // An empty retry must not erase an earlier estimate that found figures.
+  if (!e.medianLpa && all[k]?.medianLpa) return;
+  all[k] = e;
   const dir = join(homedir(), ".jobscout");
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   writeFileSync(FILE, JSON.stringify(all, null, 2));
@@ -292,6 +334,17 @@ export function cachedEstimate(company: string, city: string | null): { lpa: num
   const fresh = (e?: Estimate) => (e?.medianLpa && Date.now() - new Date(e.at).getTime() < MAX_AGE_DAYS * 86_400_000 ? e : null);
   const e = (city ? fresh(all[key(company, city)]) : null) ?? fresh(all[key(company, null)]);
   return e ? { lpa: e.medianLpa!, where: e.scope === "city" && e.city ? e.city : "India" } : null;
+}
+
+/** True when this company was looked up recently, whether or not it found pay. Empty results expire after a week. */
+export function wasLookedUp(company: string, city: string | null): boolean {
+  const all = loadAll();
+  return [key(company, city), key(company, null)].some((k) => {
+    const e = all[k];
+    if (!e) return false;
+    const days = (Date.now() - new Date(e.at).getTime()) / 86_400_000;
+    return days < (e.medianLpa ? MAX_AGE_DAYS : 7);
+  });
 }
 
 const cap = (s: string) => s.replace(/\b\w/g, (c) => c.toUpperCase());

@@ -37,18 +37,19 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { isEngineeringRole } from "@/lib/scoring";
-import { dropKey, fitGate, payFloorLpa } from "@/lib/gate";
+import { currentCtcLpa, dropKey, fitGate, payFloorLpa } from "@/lib/gate";
+import { profile } from "@/lib/profile";
 import { cityOf } from "@/lib/location-pref";
 import { applyRoute, competition, noticeAsk } from "@/lib/signals";
 import {
-  UA, decodeEntities, guestDetail, pool, score, searchLinkedIn, sleep,
+  UA, decodeEntities, getText, guestDetail, pool, score, searchLinkedIn, sleep, type Getter,
 } from "../lib/linkedin";
 import { dedupePosts, formatPost, triagePost, type RawPost } from "../lib/posts";
 import {
   DAILY_CAP, bingSearch, boardFit, discoverFit, formatFit, loadOutbox, outboxCheck, resolveDomain, saveOutbox, saveResearch, webContacts,
   type Contact, type Draft, type Searcher, type WebHit,
 } from "./outreach";
-import { cachedEstimate, formatEstimate, lookupSalary } from "./salary";
+import { cachedEstimate, formatEstimate, lookupSalary, wasLookedUp } from "./salary";
 
 const PORT = Number(process.env.APPLY_CDP_PORT ?? 9222);
 const PROFILE =
@@ -176,6 +177,42 @@ async function sessionFetch(url: string): Promise<{ status: number; url: string;
   dataLock = next.catch(() => undefined);
   return next;
 }
+
+/**
+ * LinkedIn's guest endpoints, falling back to the same URL fetched inside the
+ * logged-in Chrome when the guest call is throttled. Without the fallback a
+ * throttled JD left the row unchecked and a throttled search read as "0 found".
+ */
+const liGet: Getter = (u) =>
+  getText(u).catch(async () => {
+    const r = await sessionFetch(u);
+    if (r.status >= 400) throw new Error(`${r.status} via browser`);
+    return r.text;
+  });
+
+/** A page's visible text from the work tab: salary pages, which need a real browser. */
+async function readPage(url: string): Promise<string> {
+  const p = await tab("work");
+  await p.goto(url, { waitUntil: "domcontentloaded" });
+  await p.waitForLoadState("load", { timeout: 8000 }).catch(() => {});
+  await sleep(800);
+  const body = () => p.evaluate(() => document.body.innerText);
+  const first = await body();
+  if (HUMAN_CHECK.test(first.slice(0, 800))) {
+    const host = new URL(url).hostname.replace(/^www\./, "");
+    const ok = await askHuman(p, host, async () => !HUMAN_CHECK.test((await body()).slice(0, 800)));
+    if (!ok) throw new Error(`${host} asked for a human check and it wasn't solved`);
+    await p.waitForLoadState("load", { timeout: 8000 }).catch(() => {});
+    return body();
+  }
+  return first;
+}
+
+/** "Pune Division" -> "Pune": how the salary sites title their city pages. */
+const CITY_SUFFIX = /\s+(Division|District|City|East|West|South|North|Urban|Rural|Metropolitan Region|Area)$/i;
+
+/** A row's pay is stated in the JD (not an estimate). */
+const parseCompLabel = (r: { g: { pay: string | null } }) => !!r.g.pay && !r.g.pay.startsWith("est.");
 
 // ---------------------------------------------------------------------------
 // Small helpers
@@ -664,20 +701,34 @@ server.registerTool(
       minScore: z.number().default(0),
       gate: z.boolean().default(true).describe("false shows everything, ranked, with no drops"),
       includeDropped: z.boolean().default(false),
+      salaries: z.boolean().default(true).describe("look up pay for every row that doesn't state it (cached per company and city)"),
     },
   },
   async (a) => {
-    const cards = await searchLinkedIn({
-      keywords: a.keywords,
-      location: a.location,
-      experience: a.experience,
-      workplace: a.workplace,
-      postedWithinSeconds: a.postedWithinDays * 86400,
-      pages: a.pages,
-    });
+    const failed = { pages: 0 };
+    const cards = await searchLinkedIn(
+      {
+        keywords: a.keywords,
+        location: a.location,
+        experience: a.experience,
+        workplace: a.workplace,
+        postedWithinSeconds: a.postedWithinDays * 86400,
+        pages: a.pages,
+      },
+      liGet,
+      failed,
+    );
+    if (!cards.length && failed.pages) {
+      return text(`LinkedIn throttled this search (${failed.pages} of ${a.pages} pages failed, browser fallback too). Nothing was filtered; wait 10-15 minutes and run it again.`);
+    }
     const eng = cards.filter((c) => isEngineeringRole(c.title));
-    const details = await pool(eng, 8, (c) => guestDetail(c.jobId).catch(() => null));
-    const all = eng.map((c, i) => {
+    // Every row gets its JD read: the gate can't check years, stack or notice without it.
+    // Four at a time, each with guest retries and then the logged-in browser.
+    const details = await pool(eng, 4, (c) => guestDetail(c.jobId, liGet).catch(() => null));
+    for (let i = 0; i < eng.length; i++) {
+      if (!details[i]) details[i] = await guestDetail(eng[i].jobId, (u) => sessionFetch(u).then((r) => r.text)).catch(() => null);
+    }
+    const judge = (c: (typeof eng)[number], i: number) => {
       const desc = details[i]?.description ?? "";
       const s = score(c.title, c.location, desc);
       const est = cachedEstimate(c.company, cityOf(c.location));
@@ -685,8 +736,29 @@ server.registerTool(
       // Rank = fit + crowding. Fit alone put a 200+ applicant role above a day-old one with 30.
       const crowd = competition(details[i]?.applicants, details[i]?.postedAgo);
       const notice = noticeAsk(`${c.title}\n${desc}`);
-      return { c, s, d: details[i], g, crowd, notice, rank: s.score + crowd.points };
-    });
+      const low = g.belowCurrent ? profile.belowCurrentPay : null;
+      return { c, s, d: details[i], g, crowd, notice, low, rank: s.score + crowd.points + (low?.points ?? 0), jd: !!desc };
+    };
+    let all = eng.map(judge);
+    // Pay for every row that doesn't state it, and for roles dropped only for
+    // their city (the gate checks location last, so everything else passed):
+    // those come back if the estimate clears the floor.
+    let lookups = 0;
+    const lookupFailed = new Map<string, string>();
+    if (a.salaries) {
+      const want = all.filter((r) => !parseCompLabel(r) && (r.g.ok || dropKey(r.g.why ?? "") === "location"));
+      const seen = new Set<string>();
+      for (const r of want) {
+        const city = cityOf(r.c.location);
+        const k = `${r.c.company.toLowerCase()}|${city ?? ""}`;
+        if (seen.has(k) || wasLookedUp(r.c.company, city)) continue;
+        seen.add(k);
+        await lookupSalary(r.c.company, "software engineer", city ? r.c.location.split(",")[0].replace(CITY_SUFFIX, "") : undefined, webSearch, readPage, "fast")
+          .catch((e: Error) => lookupFailed.set(r.c.company, e.message));
+        lookups++;
+      }
+      all = eng.map(judge);
+    }
     const dropped = a.gate ? all.filter((r) => !r.g.ok) : [];
     const why = new Map<string, number>();
     for (const r of dropped) why.set(dropKey(r.g.why!), (why.get(dropKey(r.g.why!)) ?? 0) + 1);
@@ -696,15 +768,28 @@ server.registerTool(
       .slice(0, a.limit);
     const yoe = (s: { yoeMin: number | null; yoeMax: number | null }) =>
       s.yoeMin == null ? "" : ` ${s.yoeMin}${s.yoeMax != null && s.yoeMax !== s.yoeMin ? `-${s.yoeMax}` : "+"}y`;
+    const pay = (r: (typeof all)[number]) =>
+      r.g.pay ??
+      (lookupFailed.has(r.c.company)
+        ? "SALARY LOOKUP FAILED"
+        : a.salaries && wasLookedUp(r.c.company, cityOf(r.c.location))
+          ? "no salary data found"
+          : "pay not looked up");
     const lines = rows.map(
-      ({ c, s, d, g, crowd, notice, rank }) =>
-        `${rank} ${c.jobId} | ${c.title} | ${c.company} | ${g.where} | ${d?.postedAgo ?? c.posted ?? ""}${yoe(s)} | ${g.pay ?? "pay ?"}${d?.applicants ? ` | ${d.applicants}` : ""}` +
-        ` | ${[notice?.short ? `NOTICE: ${notice.label}` : null, crowd.label, ...s.reasons.slice(0, 3)].filter(Boolean).join("; ")} | https://www.linkedin.com/jobs/view/${c.jobId}/`,
+      (r) =>
+        `${r.rank} ${r.c.jobId} | ${r.c.title} | ${r.c.company} | ${r.g.where} | ${r.d?.postedAgo ?? r.c.posted ?? ""}${yoe(r.s)} | ${pay(r)}${r.d?.applicants ? ` | ${r.d.applicants}` : ""}` +
+        ` | ${[r.jd ? null : "JD NOT READ (LinkedIn blocked it): years, stack and notice unchecked", r.notice?.short ? `NOTICE: ${r.notice.label}` : null, r.low?.label ?? null, r.crowd.label, ...r.s.reasons.slice(0, 3)].filter(Boolean).join("; ")} | https://www.linkedin.com/jobs/view/${r.c.jobId}/`,
     );
     if (a.includeDropped) lines.push("dropped:", ...dropped.map((r) => `- ${r.c.title} | ${r.c.company} | ${r.c.location}: ${r.g.why}`));
     const gated = why.size ? `, ${dropped.length} gated out: ${[...why.entries()].sort((x, y) => y[1] - x[1]).map(([k, n]) => `${n} ${k}`).join(", ")}` : "";
+    const unread = all.filter((r) => !r.jd).length;
+    const notes = [
+      failed.pages ? `${failed.pages} of ${a.pages} search pages throttled` : null,
+      unread ? `${unread} JDs unreadable even through the browser` : `all ${eng.length} JDs read`,
+      a.salaries ? `${lookups} salary lookups run${lookupFailed.size ? `, ${lookupFailed.size} FAILED: ${[...lookupFailed.values()][0]}` : ""}` : null,
+    ].filter(Boolean).join(", ");
     return text(
-      `${cards.length} found, ${cards.length - eng.length} non-engineering dropped${gated}, showing ${rows.length} by fit + crowding\nrank jobId | title | company | location | posted yoe | pay | applicants | why | link\n${lines.join("\n")}`,
+      `${cards.length} found, ${cards.length - eng.length} non-engineering dropped${gated}, showing ${rows.length} by fit + crowding (${notes})\nrank jobId | title | company | location | posted yoe | pay | applicants | why | link\n${lines.join("\n")}`,
     );
   },
 );
@@ -829,7 +914,7 @@ server.registerTool(
   "posts_search",
   {
     description:
-      "Find recruiter hiring posts on LinkedIn (where Google Form applications live) and return them triaged: one ranked line per post with role, company, location, years asked, apply route (google-form/ats/careers/email/dm), who posted it (via hiring-manager, in-house or agency, scored +12, +8, -6), a post link, and fit score from profile.ts. Drops open-to-work posts, non-hiring posts, internships, big YOE gaps and locations outside profile.locations, and says how many. Give role phrases, not sentences: each becomes its own `\"hiring\" AND \"<role>\"` search, run sorted by latest and by relevance. Measured on LinkedIn: plain multi-word queries match any word (a motion designer for 'hiring python developer'), OR groups drop precision to ~67%, one narrow boolean query per role keeps it near 100%. Uses the logged-in browser, so keep it to a few calls a day.",
+      "Find recruiter hiring posts on LinkedIn (where Google Form applications live) and return them triaged: one ranked line per post with role, company, location, years asked, apply route (google-form/ats/careers/email/dm), who posted it (via hiring-manager, in-house or agency, scored +12, +8, -6), a post link, pay (stated, or a salary lookup run for every post that names its employer), and fit score from profile.ts. Drops open-to-work posts, non-hiring posts, internships, big YOE gaps and locations outside profile.locations, and says how many. Give role phrases, not sentences: each becomes its own `\"hiring\" AND \"<role>\"` search, run sorted by latest and by relevance. Measured on LinkedIn: plain multi-word queries match any word (a motion designer for 'hiring python developer'), OR groups drop precision to ~67%, one narrow boolean query per role keeps it near 100%. Uses the logged-in browser, so keep it to a few calls a day.",
     inputSchema: {
       roles: z.array(z.string()).min(1).max(6).describe('role phrases, e.g. ["python developer", "backend developer", "django"]'),
       days: z.enum(["1", "7", "30"]).default("7"),
@@ -854,14 +939,34 @@ server.registerTool(
       }
     }
     const triaged = dedupePosts(raw.map((r) => triagePost(r, { includeInternships })));
-    const kept = triaged.filter((t) => !t.drop).sort((a, b) => b.score - a.score);
+    const kept = triaged.filter((t) => !t.drop);
+    // Pay for every kept post that names its employer and doesn't state pay.
+    let lookups = 0;
+    for (const t of kept) {
+      if (t.pay || t.company === "(company unclear)") continue;
+      const city = cityOf(t.location);
+      let failed = false;
+      if (!wasLookedUp(t.company, city)) {
+        await lookupSalary(t.company, "software engineer", city ?? undefined, webSearch, readPage, "fast").catch(() => (failed = true));
+        lookups++;
+      }
+      const est = cachedEstimate(t.company, city);
+      t.pay = est ? `est. ₹${est.lpa}L ${est.where}` : failed ? "SALARY LOOKUP FAILED" : "no salary data found";
+      const current = currentCtcLpa();
+      if (est && current && est.lpa < current) {
+        t.score += profile.belowCurrentPay.points;
+        t.reasons.unshift(profile.belowCurrentPay.label);
+      }
+    }
+    // Sorted after the pay lookups, which can move a post down.
+    kept.sort((a, b) => b.score - a.score);
     const dropped = triaged.filter((t) => t.drop);
     const why = new Map<string, number>();
     for (const d of dropped) {
       const k = d.drop!.replace(/\(.*\)|in .*|asks \d+/, (m) => (m.startsWith("asks") ? "asks too many" : "")).trim();
       why.set(k, (why.get(k) ?? 0) + 1);
     }
-    const head = `${raw.length} posts from ${queries.length * sorts.length} searches, ${raw.length - triaged.length} duplicates · kept ${kept.length} · dropped ${dropped.length}${
+    const head = `${raw.length} posts from ${queries.length * sorts.length} searches, ${raw.length - triaged.length} duplicates, ${lookups} salary lookups · kept ${kept.length} · dropped ${dropped.length}${
       why.size ? `: ${[...why.entries()].sort((a, b) => b[1] - a[1]).map(([k, n]) => `${n} ${k}`).join(", ")}` : ""
     }`;
     const lines = kept.map((t, i) => formatPost(t, i + 1, textChars));
@@ -1055,10 +1160,37 @@ async function linkedinPeople(company: string, titles: string[]): Promise<Contac
  * from DuckDuckGo and a degraded index from Bing; a signed-in browser gets the
  * real results. Falls back to Bing when Google shows its "unusual traffic" page.
  */
+/**
+ * A human check ("I'm not a robot", Cloudflare's "Verify you are human") is
+ * handed to the user, never solved by script: bring the tab forward, notify,
+ * and wait for them to clear it. If nobody does within `waitMs`, stop asking
+ * for 15 minutes so a batch of lookups doesn't raise ten prompts.
+ */
+let humanCheckSnoozedUntil = 0;
+async function askHuman(p: Page, where: string, cleared: () => Promise<boolean>, waitMs = 120_000): Promise<boolean> {
+  if (Date.now() < humanCheckSnoozedUntil) return false;
+  await p.bringToFront().catch(() => {});
+  const msg = `${where} wants an "I'm not a robot" check. Solve it in the jobscout Chrome; the search waits 2 minutes.`;
+  spawn("osascript", ["-e", `display notification "${msg.replace(/"/g, "'")}" with title "jobscout needs you" sound name "Glass"`]).on("error", () => {});
+  const end = Date.now() + waitMs;
+  while (Date.now() < end) {
+    await sleep(2000);
+    if (await cleared().catch(() => false)) return true;
+  }
+  humanCheckSnoozedUntil = Date.now() + 15 * 60_000;
+  return false;
+}
+
+const HUMAN_CHECK = /verify you are human|are you a robot|i'm not a robot|unusual traffic|just a moment|checking your browser|captcha/i;
+
 const webSearch: Searcher = async (q, n = 10) => {
   const p = await tab("work");
   await p.goto(`https://www.google.com/search?q=${encodeURIComponent(q)}&num=${Math.max(n, 10)}&hl=en`, { waitUntil: "domcontentloaded" });
-  if (/\/sorry\//.test(p.url())) return bingSearch(q, n);
+  if (/\/sorry\//.test(p.url())) {
+    // Google's check redirects back to the results once it's solved.
+    const ok = await askHuman(p, "Google", async () => !/\/sorry\//.test(p.url()));
+    if (!ok) return bingSearch(q, n);
+  }
   await p.waitForSelector("#search a h3, #botstuff", { timeout: 10000 }).catch(() => {});
   const hits: WebHit[] = await p.evaluate(() =>
     Array.from(document.querySelectorAll("#search a:has(h3)")).map((a) => {
@@ -1135,14 +1267,8 @@ server.registerTool(
       city ??= cityOf(d.location) ? d.location.split(",")[0].replace(/\s+(Division|District|City|East|West|South|North|Metropolitan Region)$/i, "") : undefined;
     }
     if (!company) return text("Give a company or a jobId.");
-    const read = async (url: string) => {
-      const p = await tab("work");
-      await p.goto(url, { waitUntil: "domcontentloaded" });
-      await p.waitForLoadState("load", { timeout: 8000 }).catch(() => {});
-      await sleep(800);
-      return p.evaluate(() => document.body.innerText);
-    };
-    const e = await lookupSalary(company, role, city, webSearch, deep ? read : null);
+    const e = await lookupSalary(company, role, city, webSearch, deep ? readPage : null).catch((err: Error) => err);
+    if (e instanceof Error) return text(`Salary lookup for ${company} failed, nothing cached: ${e.message}`);
     return text(formatEstimate(e, payFloorLpa()));
   },
 );

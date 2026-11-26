@@ -56,14 +56,21 @@ export async function pool<T, R>(items: T[], n: number, fn: (t: T) => Promise<R>
   return out;
 }
 
-export async function getText(url: string, tries = 3): Promise<string> {
+/**
+ * A guest-endpoint GET. LinkedIn answers a burst with 429 (or a 999), so the
+ * backoff is exponential with jitter: 1.5s, 3s, 6s. Callers with a logged-in
+ * browser pass their own fetcher to fall back to it (see apply-mcp).
+ */
+export type Getter = (url: string) => Promise<string>;
+
+export async function getText(url: string, tries = 4): Promise<string> {
   for (let a = 0; ; a++) {
     const r = await fetch(url, { headers: { "user-agent": UA, "accept-language": "en-US,en" } });
     if (r.ok) return r.text();
-    if (a + 1 >= tries || (r.status !== 429 && r.status < 500)) {
+    if (a + 1 >= tries || (r.status !== 429 && r.status !== 999 && r.status < 500)) {
       throw new Error(`${r.status} from ${new URL(url).pathname}`);
     }
-    await sleep(800 * (a + 1));
+    await sleep(1500 * 2 ** a + Math.random() * 500);
   }
 }
 
@@ -106,8 +113,8 @@ export interface GuestDetail {
   description: string;
 }
 
-export async function guestDetail(jobId: string): Promise<GuestDetail> {
-  const h = await getText(`https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/${jobId}`);
+export async function guestDetail(jobId: string, get: Getter = getText): Promise<GuestDetail> {
+  const h = await get(`https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/${jobId}`);
   const criteria: Record<string, string> = {};
   for (const m of h.matchAll(
     /description__job-criteria-subheader[^>]*>([\s\S]*?)<\/h3>[\s\S]*?description__job-criteria-text[^>]*>([\s\S]*?)<\/span>/g,
@@ -159,8 +166,12 @@ export interface SearchOptions {
   sort?: "DD" | "R";
 }
 
-/** One search, pages fetched in parallel, de-duplicated by jobId. */
-export async function searchLinkedIn(o: SearchOptions): Promise<Card[]> {
+/**
+ * One search, pages fetched in parallel, de-duplicated by jobId. `failed`
+ * counts pages that never came back, so a throttled search reads as throttled
+ * rather than as "0 found".
+ */
+export async function searchLinkedIn(o: SearchOptions, get: Getter = getText, failed?: { pages: number }): Promise<Card[]> {
   const base = new URL("https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search");
   base.searchParams.set("keywords", o.keywords);
   base.searchParams.set("location", o.location ?? "India");
@@ -172,7 +183,10 @@ export async function searchLinkedIn(o: SearchOptions): Promise<Card[]> {
     Array.from({ length: o.pages ?? 1 }, (_, i) => {
       const u = new URL(base);
       u.searchParams.set("start", String(i * 10));
-      return getText(u.href).then(parseCards, () => [] as Card[]);
+      return get(u.href).then(parseCards, () => {
+        if (failed) failed.pages++;
+        return [] as Card[];
+      });
     }),
   );
   const seen = new Set<string>();
