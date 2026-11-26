@@ -14,7 +14,9 @@
  */
 import { profile } from "@/lib/profile";
 import { isEngineeringRole, scoreJob } from "@/lib/scoring";
-import { locationVerdict } from "@/lib/location-pref";
+import { fitGate } from "@/lib/gate";
+import { ABROAD } from "@/lib/location-pref";
+import { applyRoute, competition, noticeAsk, type NoticeAsk } from "@/lib/signals";
 import { LINKEDIN_COMPANY } from "./linkedin";
 
 export interface RawPost {
@@ -27,6 +29,13 @@ export interface RawPost {
 
 export type ApplyKind = "google-form" | "ats" | "careers" | "email" | "dm" | "none";
 
+/**
+ * Who is behind the post. "hiring-manager": a founder, CTO or engineering
+ * manager at the employer. "in-house": the employer's own HR or the company
+ * page. "agency": a recruiter placing someone else's role.
+ */
+export type PostSource = "hiring-manager" | "in-house" | "agency" | "unknown";
+
 export interface TriagedPost {
   author: string;
   authorRole: string;
@@ -36,6 +45,13 @@ export interface TriagedPost {
   location: string;
   yoe: { min: number; max: number | null } | null;
   apply: { kind: ApplyKind; target: string | null };
+  source: PostSource;
+  /** The poster's own employer, from their headline or email domain. */
+  authorOrg: string | null;
+  /** The notice the post wants, when it says. */
+  notice: NoticeAsk | null;
+  /** Stated in the post, when it is. */
+  pay: string | null;
   score: number;
   reasons: string[];
   /** Why it was dropped, when it was. */
@@ -45,7 +61,7 @@ export interface TriagedPost {
 }
 
 const OPEN_TO_WORK =
-  /#opentowork|open to (new )?(work|opportunities|roles)|i'?m (actively )?(looking|seeking|available)|available to (start|join) immediately|seeking (entry[- ]level |new )?(career )?opportunit/i;
+  /#opentowork|open to (new )?(work|opportunities|roles)|i['’]?m (actively )?(looking|seeking|available)|my next (challenge|role|opportunity)|(officially )?on the (job )?market|available to (start|join) immediately|seeking (entry[- ]level |new )?(career )?opportunit/i;
 const HIRING =
   /we'?re hiring|we are hiring|#hiring|\bhiring\b|is hiring|looking for (a|an|talented|skilled|experienced)|job opening|openings? for|urgent(ly)? (hiring|requirement)|walk-?in/i;
 const INTERN = /\bintern(ship)?s?\b|\bunpaid\b|\bstipend\b|\bfreshers? only\b/i;
@@ -57,8 +73,6 @@ const INDIA_PLACES = [
   "bhubaneswar", "lucknow", "vadodara", "surat", "mysore", "mysuru", "visakhapatnam", "vizag", "india",
   "pan india", "pan-india",
 ];
-const ABROAD =
-  /\b(jakarta|indonesia|lahore|karachi|islamabad|pakistan|dhaka|bangladesh|uae|dubai|abu dhabi|saudi|riyadh|qatar|doha|singapore|malaysia|philippines|manila|nigeria|lagos|kenya|nairobi|usa|united states|canada|toronto|uk|london|germany|berlin|netherlands|amsterdam|australia|sydney|vietnam|egypt|cairo|nepal|sri lanka)\b/i;
 const REMOTE = /\bremote\b|work from home|\bwfh\b/i;
 
 function firstMatch(text: string, res: RegExp[]): string | null {
@@ -103,16 +117,67 @@ function parseRole(body: string): string {
   ).replace(/[\s|:–-]+$/, "");
 }
 
-function parseCompany(body: string, authorRole: string): string {
-  return (
+const stripLegal = (s: string) => s.replace(/\s*(?:pvt\.?|private)?\s*(?:ltd\.?|limited)?\s*$/i, "").trim();
+
+/** The employer named in the post body, or "" when it names none. */
+function parseCompany(body: string): string {
+  const c = stripLegal(
     firstMatch(body, [
       /(?:company|organi[sz]ation|client)\s*[:\-–]\s*([^\n|📍💼🏢⏳]{2,60})/i,
-      /\b(?:at|join)\s+([A-Z][\w&.]*(?:\s+[A-Z][\w&.]*){0,4})(?=[\s,!.]|$)/,
+      /\b(?:at|join)\s+([A-Z][\w&.]*(?:\s+[A-Z][\w&.]*){0,4})(?=[\s,!.:;|)]|$)/,
       /([A-Z][\w&.]*(?:\s+[A-Z][\w&.]*){0,4})\s+is\s+(?:hiring|looking)/,
-    ]) ??
-    firstMatch(authorRole, [/@\s*([^|]+)/, /\bat\s+([^|]+)/]) ??
-    ""
-  ).replace(/\s*(?:pvt\.?|private)?\s*(?:ltd\.?|limited)?\s*$/i, "").trim();
+    ]) ?? "",
+  );
+  // "Hiring for our client: Backend Engineer (Python), Location: ..." puts the role where the name would be.
+  return /developer|engineer|location|experience|\byears?\b/i.test(c) ? "" : c;
+}
+
+/** Company pages render their name twice: "Sumfive Technologies Sumfive Technologies". */
+const once = (s: string) => s.replace(/^(.{3,}?)\s+\1$/, "$1");
+
+const AGENCY =
+  /for (?:one of )?our (?:esteemed |reputed |leading |valued )?clients?|on behalf of|client of ours|\bour client\b|staffing|placement|manpower|recruitment (?:agency|firm|services|partner)|talent solutions|hiring partner|\brpo\b|\bc2c\b|bench sales|consultancy|it consulting|headhunt/i;
+const MANAGER_ROLE =
+  /\b(cto|ceo|founder|co-?founder|vp,? engineering|head of (?:engineering|technology|tech)|engineering manager|director of engineering|tech(?:nical)? lead|team lead)\b/i;
+const FREEMAIL = /^(gmail|googlemail|yahoo|outlook|hotmail|rediffmail|icloud|proton|protonmail|live|ymail|aol)$/i;
+const ORG_NOISE = /\b(pvt|private|ltd|limited|inc|llp|llc|technologies|technology|tech|solutions|software|systems|labs?|india|global|group|services|consulting|the)\b/g;
+
+/** "4Labs Technologies Pvt Ltd" and "4labsinc.com" are the same org; "ApTask" and "Kinaxis" are not. */
+export function sameOrg(a: string, b: string): boolean {
+  const n = (s: string) => s.toLowerCase().replace(ORG_NOISE, " ").replace(/[^a-z0-9]+/g, " ").trim();
+  const [x, y] = [n(a), n(b)];
+  if (!x || !y) return false;
+  const [fx, fy] = [x.split(" ")[0], y.split(" ")[0]];
+  return x === y || (fx.length >= 3 && y.replace(/ /g, "").includes(fx)) || (fy.length >= 3 && x.replace(/ /g, "").includes(fy));
+}
+
+interface AuthorOrg {
+  org: string;
+  /** Where it came from. An email domain alone is weak: recruiting firms mail from their own domain too. */
+  from: "headline" | "page" | "email";
+}
+
+/** The poster's employer: "HR Recruiter @ 4Labs Technologies | MBA" -> "4Labs Technologies", else the email domain. */
+function authorOrgOf(author: string, authorRole: string, body: string): AuthorOrg | null {
+  const head = firstMatch(authorRole, [/@\s*([^|•,()]{2,50})/, /\bat\s+([A-Z0-9][^|•,()]{1,50})/]);
+  if (head) return { org: stripLegal(head), from: "headline" };
+  // A company page posts as itself: the "author" is the company and its "headline" repeats it.
+  if (author && authorRole && sameOrg(author, authorRole) && !/\b(hr|recruit|talent)/i.test(authorRole)) return { org: author, from: "page" };
+  const domain = body.match(/[\w.+-]+@([\w-]+)\.[\w.-]+/)?.[1];
+  return domain && !FREEMAIL.test(domain) ? { org: domain, from: "email" } : null;
+}
+
+function classifySource(body: string, author: string, authorRole: string, employer: string, a: AuthorOrg | null): PostSource {
+  // The display name counts too: "US Bench Sales Recruiter-C2C Requirements J Rao" put it there, not in the headline.
+  if (AGENCY.test(body) || AGENCY.test(authorRole) || AGENCY.test(author)) return "agency";
+  const org = a?.org ?? null;
+  if (employer && org && !sameOrg(employer, org)) return "agency";
+  // An email domain proves the employer only when the post names that employer. Otherwise
+  // it's as likely a recruiting firm's domain (inkitsolutions, ba-itconsult) as the employer's.
+  if (a?.from === "email" && !(employer && sameOrg(employer, a.org))) return "unknown";
+  const own = (employer && org && sameOrg(employer, org)) || (!employer && org && /\b(we(?:'re| are)|our (?:team|company)|join us)\b/i.test(body));
+  if (!own) return "unknown";
+  return MANAGER_ROLE.test(authorRole) && !sameOrg(author, org!) ? "hiring-manager" : "in-house";
 }
 
 function classifyApply(links: string[], body: string): { kind: ApplyKind; target: string | null } {
@@ -143,28 +208,37 @@ function splitHeader(text: string): { author: string; authorRole: string; age: s
 
 export interface TriageOptions {
   includeInternships?: boolean;
-  /** Keep roles asking for more than this many years above yours. */
-  maxYoeGap?: number;
 }
 
 export function triagePost(p: RawPost, o: TriageOptions = {}): TriagedPost {
-  const { author, authorRole, age, body } = splitHeader(p.text);
+  const h = splitHeader(p.text);
+  const { age, body } = h;
+  const author = once(h.author);
+  const authorRole = once(h.authorRole);
   const role = parseRole(body);
-  const company = parseCompany(body, authorRole);
+  const employer = parseCompany(body);
+  const byAuthor = authorOrgOf(author, authorRole, body);
+  const authorOrg = byAuthor?.org ?? null;
+  const source = classifySource(body, author, authorRole, employer, byAuthor);
+  // An in-house post that names no employer is for the poster's own company.
+  const company = employer || (source === "in-house" || source === "hiring-manager" ? authorOrg ?? "" : "");
   const location = parseLocation(body);
   const yoe = parsePostYoe(body);
   const apply = classifyApply(p.links, body);
+  const route = applyRoute(apply.kind);
+  const fresh = competition(null, age);
+  const notice = noticeAsk(body);
 
   let drop: string | null = null;
-  const where = locationVerdict(location, body);
+  const gate = fitGate({ title: role || body.slice(0, 80), location, description: body, yoe });
   const indiaish = INDIA_PLACES.some((c) => new RegExp(`\\b${c}\\b`, "i").test(location)) || /remote/i.test(location);
-  if (OPEN_TO_WORK.test(body) && !/we'?re hiring|we are hiring/i.test(body)) drop = "open-to-work post, not a role";
+  if (OPEN_TO_WORK.test(body) && !/we['’]?re hiring|we are hiring/i.test(body)) drop = "open-to-work post, not a role";
   else if (!HIRING.test(body)) drop = "not a hiring post";
+  else if (profile.repostBlocklist.some((n) => `${author} ${company}`.toLowerCase().includes(n))) drop = "reposter, employer hidden";
   else if (role && !isEngineeringRole(role)) drop = `not an engineering role (${role.slice(0, 40)})`;
-  else if (!where.ok) drop = where.why;
   else if (/\b(indonesian|pakistani|uae nationals?|us citizens?) (candidates )?only\b/i.test(body)) drop = "restricted to another country's candidates";
   else if (!o.includeInternships && INTERN.test(`${role} ${body.slice(0, 200)}`)) drop = "internship";
-  else if (yoe && yoe.min - profile.yearsExperience > (o.maxYoeGap ?? 2)) drop = `asks ${yoe.min}+ years`;
+  else if (!gate.ok) drop = gate.why;
 
   const s = scoreJob(
     {
@@ -182,11 +256,22 @@ export function triagePost(p: RawPost, o: TriageOptions = {}): TriagedPost {
     age,
     role: role || "(role unclear)",
     company: company || "(company unclear)",
-    location: where.label,
+    source,
+    authorOrg,
+    location: gate.where,
+    pay: gate.pay,
     yoe,
     apply,
-    score: s.score,
-    reasons: s.reasons,
+    // Posts carry no applicant count, so crowding is age alone. Not clamped at
+    // 100: it's a rank, and a capped score would tie the best posts together.
+    score: Math.max(0, s.score + profile.postSource[source] + route.points + fresh.points),
+    reasons: [
+      notice?.short ? `NOTICE: ${notice.label}` : null,
+      source === "unknown" ? null : `via ${source}${authorOrg ? ` (${authorOrg})` : ""}`,
+      fresh.label,
+      ...s.reasons,
+    ].filter((r): r is string => !!r),
+    notice,
     drop,
     text: body,
     post: p.post,
@@ -208,7 +293,7 @@ export function formatPost(p: TriagedPost, n: number, textChars: number): string
   const yoe = p.yoe ? `${p.yoe.min}${p.yoe.max != null && p.yoe.max !== p.yoe.min ? `-${p.yoe.max}` : "+"}y` : "?y";
   const apply = p.apply.target ? `${p.apply.kind} ${p.apply.target}` : p.apply.kind;
   const lines = [
-    `#${n} ${p.score} | ${p.role} | ${p.company} | ${p.location} | ${yoe} | ${p.age} | apply: ${apply}`,
+    `#${n} ${p.score} | ${p.role} | ${p.company} | ${p.location} | ${yoe}${p.pay ? ` | ${p.pay}` : ""} | ${p.age} | apply: ${apply}`,
     `   by ${p.author}${p.authorRole ? ` (${p.authorRole.slice(0, 60)})` : ""} | ${p.reasons.slice(0, 3).join("; ")}`,
   ];
   if (textChars > 0) lines.push(`   ${p.text.slice(0, textChars)}`);

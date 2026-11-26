@@ -19,7 +19,8 @@
  *   - Common screening questions are answered from applicant.json, so a form
  *     read returns only the questions it couldn't answer.
  *
- * Nothing here submits anything unless form_submit is called with confirm.
+ * Nothing here submits anything unless form_submit or email_send is called with
+ * confirm. Cold emails are composed as Gmail drafts for you to send.
  *
  * Chrome: attaches over CDP to 127.0.0.1:$APPLY_CDP_PORT (default 9222), and
  * launches Chrome with a dedicated profile if nothing is listening. Since Chrome
@@ -36,10 +37,19 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { isEngineeringRole } from "@/lib/scoring";
+import { currentCtcLpa, dropKey, fitGate, payFloorLpa } from "@/lib/gate";
+import { profile } from "@/lib/profile";
+import { cityOf } from "@/lib/location-pref";
+import { applyRoute, competition, noticeAsk } from "@/lib/signals";
 import {
-  UA, decodeEntities, guestDetail, pool, score, searchLinkedIn, sleep,
+  UA, decodeEntities, getText, guestDetail, pool, score, searchLinkedIn, sleep, type Getter,
 } from "../lib/linkedin";
 import { dedupePosts, formatPost, triagePost, type RawPost } from "../lib/posts";
+import {
+  DAILY_CAP, bingSearch, boardFit, discoverFit, formatFit, loadOutbox, outboxCheck, resolveDomain, saveOutbox, saveResearch, webContacts,
+  type Contact, type Draft, type Searcher, type WebHit,
+} from "./outreach";
+import { cachedEstimate, formatEstimate, lookupSalary, wasLookedUp } from "./salary";
 
 const PORT = Number(process.env.APPLY_CDP_PORT ?? 9222);
 const PROFILE =
@@ -59,6 +69,8 @@ let browser: Browser | null = null;
 let ctx: BrowserContext | null = null;
 let dataTab: Page | null = null;
 let workTab: Page | null = null;
+/** Gmail compose lives in its own tab so a search in the work tab can't discard an unsent draft. */
+let mailTab: Page | null = null;
 
 async function cdpUp(): Promise<boolean> {
   try {
@@ -92,6 +104,7 @@ async function context(): Promise<BrowserContext> {
   ctx = browser.contexts()[0] ?? (await browser.newContext());
   dataTab = null;
   workTab = null;
+  mailTab = null;
   return ctx;
 }
 
@@ -112,9 +125,9 @@ async function targetId(p: Page): Promise<string> {
   }
 }
 
-async function tab(kind: "data" | "work"): Promise<Page> {
+async function tab(kind: "data" | "work" | "mail"): Promise<Page> {
   const c = await context();
-  const cur = kind === "data" ? dataTab : workTab;
+  const cur = kind === "data" ? dataTab : kind === "mail" ? mailTab : workTab;
   if (cur && !cur.isClosed()) return cur;
   let saved: Record<string, string> = {};
   try {
@@ -135,6 +148,7 @@ async function tab(kind: "data" | "work"): Promise<Page> {
     writeFileSync(TABS_FILE, JSON.stringify(saved));
   }
   if (kind === "data") dataTab = p;
+  else if (kind === "mail") mailTab = p;
   else workTab = p;
   return p;
 }
@@ -163,6 +177,42 @@ async function sessionFetch(url: string): Promise<{ status: number; url: string;
   dataLock = next.catch(() => undefined);
   return next;
 }
+
+/**
+ * LinkedIn's guest endpoints, falling back to the same URL fetched inside the
+ * logged-in Chrome when the guest call is throttled. Without the fallback a
+ * throttled JD left the row unchecked and a throttled search read as "0 found".
+ */
+const liGet: Getter = (u) =>
+  getText(u).catch(async () => {
+    const r = await sessionFetch(u);
+    if (r.status >= 400) throw new Error(`${r.status} via browser`);
+    return r.text;
+  });
+
+/** A page's visible text from the work tab: salary pages, which need a real browser. */
+async function readPage(url: string): Promise<string> {
+  const p = await tab("work");
+  await p.goto(url, { waitUntil: "domcontentloaded" });
+  await p.waitForLoadState("load", { timeout: 8000 }).catch(() => {});
+  await sleep(800);
+  const body = () => p.evaluate(() => document.body.innerText);
+  const first = await body();
+  if (HUMAN_CHECK.test(first.slice(0, 800))) {
+    const host = new URL(url).hostname.replace(/^www\./, "");
+    const ok = await askHuman(p, host, async () => !HUMAN_CHECK.test((await body()).slice(0, 800)));
+    if (!ok) throw new Error(`${host} asked for a human check and it wasn't solved`);
+    await p.waitForLoadState("load", { timeout: 8000 }).catch(() => {});
+    return body();
+  }
+  return first;
+}
+
+/** "Pune Division" -> "Pune": how the salary sites title their city pages. */
+const CITY_SUFFIX = /\s+(Division|District|City|East|West|South|North|Urban|Rural|Metropolitan Region|Area)$/i;
+
+/** A row's pay is stated in the JD (not an estimate). */
+const parseCompLabel = (r: { g: { pay: string | null } }) => !!r.g.pay && !r.g.pay.startsWith("est.");
 
 // ---------------------------------------------------------------------------
 // Small helpers
@@ -619,13 +669,27 @@ async function fillGeneric(p: Page, s: FormSession, file: string | null): Promis
 // ---------------------------------------------------------------------------
 // Server
 
-const server = new McpServer({ name: "apply", version: "0.1.0" });
+/**
+ * Sent to the client as server instructions, so every session searches the
+ * same way. Kept free of personal figures: the repo is public, and the pay
+ * floor lives in .env (PAY_OVERRIDE_LPA).
+ */
+const INSTRUCTIONS = `Job search policy (tuning lives in src/lib/profile.ts and src/lib/gate.ts):
+- Target: backend roles in Python or Go, or full stack where the backend is Python or Go. Not frontend-only, Java/.NET/PHP, mobile, data or QA roles.
+- Experience: the user has 3 years and can only apply where the stated minimum is 3 years or less. A "4+ years" ask is not worth listing. An unstated ask is fine.
+- Location: Pune, Mumbai, Bengaluru, Hyderabad, or remote open to India. Other Indian cities (Delhi NCR, Noida, Gurugram, Jaipur, Chandigarh, Chennai and so on) only when pay clears the floor, stated or from salary_lookup.
+- jobs_search and posts_search already apply these rules and report what they dropped. Cover the search with several narrow calls rather than one broad one: jobs_search for "python backend", "golang", "python full stack", "django", "fastapi", plus one with workplace ["remote"]; posts_search with roles like "python developer", "golang developer", "backend developer".
+- Pay: when a role you recommend states no pay, run salary_lookup with its jobId so the figures are for the job's city (a few per session, it uses Google in the user's browser). Report pay as a range with its source, city and sample, never one number presented as fact.
+- Posts: rank posts from the employer's own people first. posts_search tags each "via hiring-manager" (founder, CTO, engineering manager at the employer), "via in-house" (the employer's HR or company page) or "via agency" (recruiter placing another company's role, or "for our client"). Hiring-manager and in-house posts are the ones worth a same-day application and a direct message.
+- Always give a link per role: the LinkedIn job link from jobs_search, and for posts the post link plus the apply target.`;
+
+const server = new McpServer({ name: "apply", version: "0.1.0" }, { instructions: INSTRUCTIONS });
 
 server.registerTool(
   "jobs_search",
   {
     description:
-      "Search LinkedIn jobs and return them ranked by fit with the jobscout profile (stack, level, YOE ask, blockers). No browser needed. Returns jobId per row for job_detail.",
+      "Search LinkedIn jobs and return them ranked by fit with the jobscout profile (stack, level, YOE ask, blockers). Applies the fit gate first: drops roles asking more years than you can apply with, roles with no Python or Go, frontend-only titles, and locations outside your cities unless remote or paying above the floor; the header says how many went for each reason. Ranked by fit plus crowding (applicant count, posted <24h; weights in profile.competition). Rows show stated pay or a cached salary_lookup estimate marked est., and NOTICE: when the JD wants a shorter notice than NOTICE_DAYS (flagged, not dropped). No browser needed. Returns jobId and link per row.",
     inputSchema: {
       keywords: z.string(),
       location: z.string().default("India"),
@@ -635,35 +699,97 @@ server.registerTool(
       pages: z.number().int().min(1).max(5).default(2).describe("10 results per page"),
       limit: z.number().int().min(1).max(50).default(20),
       minScore: z.number().default(0),
+      gate: z.boolean().default(true).describe("false shows everything, ranked, with no drops"),
+      includeDropped: z.boolean().default(false),
+      salaries: z.boolean().default(true).describe("look up pay for every row that doesn't state it (cached per company and city)"),
     },
   },
   async (a) => {
-    const cards = await searchLinkedIn({
-      keywords: a.keywords,
-      location: a.location,
-      experience: a.experience,
-      workplace: a.workplace,
-      postedWithinSeconds: a.postedWithinDays * 86400,
-      pages: a.pages,
-    });
+    const failed = { pages: 0 };
+    const cards = await searchLinkedIn(
+      {
+        keywords: a.keywords,
+        location: a.location,
+        experience: a.experience,
+        workplace: a.workplace,
+        postedWithinSeconds: a.postedWithinDays * 86400,
+        pages: a.pages,
+      },
+      liGet,
+      failed,
+    );
+    if (!cards.length && failed.pages) {
+      return text(`LinkedIn throttled this search (${failed.pages} of ${a.pages} pages failed, browser fallback too). Nothing was filtered; wait 10-15 minutes and run it again.`);
+    }
     const eng = cards.filter((c) => isEngineeringRole(c.title));
-    const details = await pool(eng, 8, (c) => guestDetail(c.jobId).catch(() => null));
-    const rows = eng
-      .map((c, i) => {
-        const s = score(c.title, c.location, details[i]?.description ?? "");
-        return { c, s, d: details[i] };
-      })
-      .filter((r) => r.s.eligibility !== "blocked" && r.s.score >= a.minScore)
-      .sort((x, y) => y.s.score - x.s.score)
+    // Every row gets its JD read: the gate can't check years, stack or notice without it.
+    // Four at a time, each with guest retries and then the logged-in browser.
+    const details = await pool(eng, 4, (c) => guestDetail(c.jobId, liGet).catch(() => null));
+    for (let i = 0; i < eng.length; i++) {
+      if (!details[i]) details[i] = await guestDetail(eng[i].jobId, (u) => sessionFetch(u).then((r) => r.text)).catch(() => null);
+    }
+    const judge = (c: (typeof eng)[number], i: number) => {
+      const desc = details[i]?.description ?? "";
+      const s = score(c.title, c.location, desc);
+      const est = cachedEstimate(c.company, cityOf(c.location));
+      const g = fitGate({ title: c.title, location: c.location, description: desc, estimateLpa: est?.lpa, estimateWhere: est?.where });
+      // Rank = fit + crowding. Fit alone put a 200+ applicant role above a day-old one with 30.
+      const crowd = competition(details[i]?.applicants, details[i]?.postedAgo);
+      const notice = noticeAsk(`${c.title}\n${desc}`);
+      const low = g.belowCurrent ? profile.belowCurrentPay : null;
+      return { c, s, d: details[i], g, crowd, notice, low, rank: s.score + crowd.points + (low?.points ?? 0), jd: !!desc };
+    };
+    let all = eng.map(judge);
+    // Pay for every row that doesn't state it, and for roles dropped only for
+    // their city (the gate checks location last, so everything else passed):
+    // those come back if the estimate clears the floor.
+    let lookups = 0;
+    const lookupFailed = new Map<string, string>();
+    if (a.salaries) {
+      const want = all.filter((r) => !parseCompLabel(r) && (r.g.ok || dropKey(r.g.why ?? "") === "location"));
+      const seen = new Set<string>();
+      for (const r of want) {
+        const city = cityOf(r.c.location);
+        const k = `${r.c.company.toLowerCase()}|${city ?? ""}`;
+        if (seen.has(k) || wasLookedUp(r.c.company, city)) continue;
+        seen.add(k);
+        await lookupSalary(r.c.company, "software engineer", city ? r.c.location.split(",")[0].replace(CITY_SUFFIX, "") : undefined, webSearch, readPage, "fast")
+          .catch((e: Error) => lookupFailed.set(r.c.company, e.message));
+        lookups++;
+      }
+      all = eng.map(judge);
+    }
+    const dropped = a.gate ? all.filter((r) => !r.g.ok) : [];
+    const why = new Map<string, number>();
+    for (const r of dropped) why.set(dropKey(r.g.why!), (why.get(dropKey(r.g.why!)) ?? 0) + 1);
+    const rows = all
+      .filter((r) => (!a.gate || r.g.ok) && r.s.eligibility !== "blocked" && r.s.score >= a.minScore)
+      .sort((x, y) => y.rank - x.rank)
       .slice(0, a.limit);
     const yoe = (s: { yoeMin: number | null; yoeMax: number | null }) =>
       s.yoeMin == null ? "" : ` ${s.yoeMin}${s.yoeMax != null && s.yoeMax !== s.yoeMin ? `-${s.yoeMax}` : "+"}y`;
+    const pay = (r: (typeof all)[number]) =>
+      r.g.pay ??
+      (lookupFailed.has(r.c.company)
+        ? "SALARY LOOKUP FAILED"
+        : a.salaries && wasLookedUp(r.c.company, cityOf(r.c.location))
+          ? "no salary data found"
+          : "pay not looked up");
     const lines = rows.map(
-      ({ c, s, d }) =>
-        `${s.score} ${c.jobId} | ${c.title} | ${c.company} | ${c.location} | ${c.posted ?? ""}${yoe(s)}${d?.applicants ? ` | ${d.applicants}` : ""} | ${s.reasons.slice(0, 3).join("; ")}`,
+      (r) =>
+        `${r.rank} ${r.c.jobId} | ${r.c.title} | ${r.c.company} | ${r.g.where} | ${r.d?.postedAgo ?? r.c.posted ?? ""}${yoe(r.s)} | ${pay(r)}${r.d?.applicants ? ` | ${r.d.applicants}` : ""}` +
+        ` | ${[r.jd ? null : "JD NOT READ (LinkedIn blocked it): years, stack and notice unchecked", r.notice?.short ? `NOTICE: ${r.notice.label}` : null, r.low?.label ?? null, r.crowd.label, ...r.s.reasons.slice(0, 3)].filter(Boolean).join("; ")} | https://www.linkedin.com/jobs/view/${r.c.jobId}/`,
     );
+    if (a.includeDropped) lines.push("dropped:", ...dropped.map((r) => `- ${r.c.title} | ${r.c.company} | ${r.c.location}: ${r.g.why}`));
+    const gated = why.size ? `, ${dropped.length} gated out: ${[...why.entries()].sort((x, y) => y[1] - x[1]).map(([k, n]) => `${n} ${k}`).join(", ")}` : "";
+    const unread = all.filter((r) => !r.jd).length;
+    const notes = [
+      failed.pages ? `${failed.pages} of ${a.pages} search pages throttled` : null,
+      unread ? `${unread} JDs unreadable even through the browser` : `all ${eng.length} JDs read`,
+      a.salaries ? `${lookups} salary lookups run${lookupFailed.size ? `, ${lookupFailed.size} FAILED: ${[...lookupFailed.values()][0]}` : ""}` : null,
+    ].filter(Boolean).join(", ");
     return text(
-      `${cards.length} found, ${cards.length - eng.length} non-engineering dropped, showing ${rows.length} by fit\nscore jobId | title | company | location | posted yoe | applicants | why\n${lines.join("\n")}`,
+      `${cards.length} found, ${cards.length - eng.length} non-engineering dropped${gated}, showing ${rows.length} by fit + crowding (${notes})\nrank jobId | title | company | location | posted yoe | pay | applicants | why | link\n${lines.join("\n")}`,
     );
   },
 );
@@ -747,9 +873,35 @@ async function scrapePosts(
         return { t, post, links };
       });
   }, limit);
+  const clean = (t: string) => t.replace(/\s*(Like|Comment|Repost|Send)(\s+(Like|Comment|Repost|Send))*\s*$/, "");
+  // The search page carries no permalink or post id any more (checked Nov 2026:
+  // only an opaque componentkey). The post's own menu has "Copy link to post",
+  // so catch what it writes to the clipboard. One menu per post costs about a
+  // second, so only for posts that survive triage.
+  await p.evaluate(() => {
+    const w = window as unknown as { __copied: string[] };
+    w.__copied = [];
+    if (navigator.clipboard) navigator.clipboard.writeText = async (t: string) => void w.__copied.push(t);
+  });
+  const cards = p.locator("h2", { hasText: /^\s*Feed post\s*$/ });
+  for (let i = 0; i < raw.length; i++) {
+    if (raw[i].post || triagePost({ text: clean(raw[i].t), links: [], post: null }).drop) continue;
+    try {
+      const n = await p.evaluate(() => (window as unknown as { __copied: string[] }).__copied.length);
+      await cards.nth(i).locator("xpath=..").locator('button[aria-label^="Open control menu"]').first().click({ timeout: 3000 });
+      await p.getByText(/^\s*copy link to post\s*$/i).first().click({ timeout: 3000 });
+      await p
+        .waitForFunction((k) => (window as unknown as { __copied: string[] }).__copied.length > k, n, { timeout: 2000 })
+        .catch(() => {});
+      raw[i].post = await p.evaluate((k) => (window as unknown as { __copied: string[] }).__copied[k] ?? null, n);
+    } catch {
+      // No link is a missing column, not a failed search.
+    }
+    await p.keyboard.press("Escape").catch(() => {});
+  }
   return Promise.all(
     raw.map(async (x) => ({
-      text: x.t.replace(/\s*(Like|Comment|Repost|Send)(\s+(Like|Comment|Repost|Send))*\s*$/, ""),
+      text: clean(x.t),
       post: x.post,
       links: (await Promise.all(x.links.slice(0, 4).map((l) => resolveShort(l).catch(() => l)))).filter(
         (l) => !/licdn\.com|linkedin\.com\/(in|company)\//.test(l),
@@ -762,7 +914,7 @@ server.registerTool(
   "posts_search",
   {
     description:
-      "Find recruiter hiring posts on LinkedIn (where Google Form applications live) and return them triaged: one ranked line per post with role, company, location, years asked, apply route (google-form/ats/careers/email/dm) and fit score from profile.ts. Drops open-to-work posts, non-hiring posts, internships, big YOE gaps and locations outside profile.locations, and says how many. Give role phrases, not sentences: each becomes its own `\"hiring\" AND \"<role>\"` search, run sorted by latest and by relevance. Measured on LinkedIn: plain multi-word queries match any word (a motion designer for 'hiring python developer'), OR groups drop precision to ~67%, one narrow boolean query per role keeps it near 100%. Uses the logged-in browser, so keep it to a few calls a day.",
+      "Find recruiter hiring posts on LinkedIn (where Google Form applications live) and return them triaged: one ranked line per post with role, company, location, years asked, apply route (google-form/ats/careers/email/dm), who posted it (via hiring-manager, in-house or agency, scored +12, +8, -6), a post link, pay (stated, or a salary lookup run for every post that names its employer), and fit score from profile.ts. Drops open-to-work posts, non-hiring posts, internships, big YOE gaps and locations outside profile.locations, and says how many. Give role phrases, not sentences: each becomes its own `\"hiring\" AND \"<role>\"` search, run sorted by latest and by relevance. Measured on LinkedIn: plain multi-word queries match any word (a motion designer for 'hiring python developer'), OR groups drop precision to ~67%, one narrow boolean query per role keeps it near 100%. Uses the logged-in browser, so keep it to a few calls a day.",
     inputSchema: {
       roles: z.array(z.string()).min(1).max(6).describe('role phrases, e.g. ["python developer", "backend developer", "django"]'),
       days: z.enum(["1", "7", "30"]).default("7"),
@@ -787,14 +939,34 @@ server.registerTool(
       }
     }
     const triaged = dedupePosts(raw.map((r) => triagePost(r, { includeInternships })));
-    const kept = triaged.filter((t) => !t.drop).sort((a, b) => b.score - a.score);
+    const kept = triaged.filter((t) => !t.drop);
+    // Pay for every kept post that names its employer and doesn't state pay.
+    let lookups = 0;
+    for (const t of kept) {
+      if (t.pay || t.company === "(company unclear)") continue;
+      const city = cityOf(t.location);
+      let failed = false;
+      if (!wasLookedUp(t.company, city)) {
+        await lookupSalary(t.company, "software engineer", city ?? undefined, webSearch, readPage, "fast").catch(() => (failed = true));
+        lookups++;
+      }
+      const est = cachedEstimate(t.company, city);
+      t.pay = est ? `est. ₹${est.lpa}L ${est.where}` : failed ? "SALARY LOOKUP FAILED" : "no salary data found";
+      const current = currentCtcLpa();
+      if (est && current && est.lpa < current) {
+        t.score += profile.belowCurrentPay.points;
+        t.reasons.unshift(profile.belowCurrentPay.label);
+      }
+    }
+    // Sorted after the pay lookups, which can move a post down.
+    kept.sort((a, b) => b.score - a.score);
     const dropped = triaged.filter((t) => t.drop);
     const why = new Map<string, number>();
     for (const d of dropped) {
       const k = d.drop!.replace(/\(.*\)|in .*|asks \d+/, (m) => (m.startsWith("asks") ? "asks too many" : "")).trim();
       why.set(k, (why.get(k) ?? 0) + 1);
     }
-    const head = `${raw.length} posts from ${queries.length * sorts.length} searches, ${raw.length - triaged.length} duplicates · kept ${kept.length} · dropped ${dropped.length}${
+    const head = `${raw.length} posts from ${queries.length * sorts.length} searches, ${raw.length - triaged.length} duplicates, ${lookups} salary lookups · kept ${kept.length} · dropped ${dropped.length}${
       why.size ? `: ${[...why.entries()].sort((a, b) => b[1] - a[1]).map(([k, n]) => `${n} ${k}`).join(", ")}` : ""
     }`;
     const lines = kept.map((t, i) => formatPost(t, i + 1, textChars));
@@ -838,7 +1010,10 @@ server.registerTool(
     for (const [k, v] of Object.entries(answers ?? {})) {
       const f = s.fields.find((x) => x.n === Number(k));
       if (!f) continue;
-      f.answer = f.options?.length && !f.options.includes(v) ? chooseOption(v, f.options) ?? v : v;
+      const pick = (a: string) => (f.options?.length && !f.options.includes(a) ? chooseOption(a, f.options) ?? a : a);
+      // Checkbox answers are several options joined by ';'. Matched whole, the
+      // string fell back to the first prefix hit, so "Django;FastAPI" ticked Django only.
+      f.answer = f.type === "checkbox" ? v.split(/\s*;\s*/).filter(Boolean).map(pick).join(";") : pick(v);
       f.from = "you";
     }
     const bank = loadBank();
@@ -938,6 +1113,764 @@ server.registerTool(
       links: Array.from(new Set(Array.from(document.querySelectorAll("a")).map((a) => a.href).filter((h) => /apply|forms\.gle|docs\.google\.com\/forms|careers|jobs\//i.test(h)))).slice(0, 15),
     }));
     return text(`${r.title} | ${p.url()}\n${clip(r.text, maxChars)}${r.links.length ? `\nlinks:\n${r.links.join("\n")}` : ""}`);
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Outreach: companies worth a cold email, public contacts, Gmail drafts
+
+/**
+ * LinkedIn people search in the work tab. Returns names and headlines only:
+ * LinkedIn shows email addresses to 1st-degree connections alone, so these are
+ * people to find a public address for, or to message.
+ */
+async function linkedinPeople(company: string, titles: string[]): Promise<Contact[] | "login"> {
+  const p = await tab("work");
+  const out: Contact[] = [];
+  for (const t of titles) {
+    await p.goto(`https://www.linkedin.com/search/results/people/?keywords=${encodeURIComponent(`${company} ${t}`)}`, { waitUntil: "domcontentloaded" });
+    if (/authwall|login/.test(p.url())) return "login";
+    // Results render inside an iframe on current LinkedIn, so wait on and read every frame.
+    for (let i = 0; i < 40; i++) {
+      const n = await Promise.all(p.frames().map((f) => f.locator("li a[href*='/in/']").count().catch(() => 0)));
+      if (n.some((x) => x > 0)) break;
+      await sleep(300);
+    }
+    const read = () =>
+      Array.from(document.querySelectorAll("li")).flatMap((li) => {
+        const a = li.querySelector("a[href*='/in/']") as HTMLAnchorElement | null;
+        if (!a) return [];
+        const lines = (li as HTMLElement).innerText.split("\n").map((x) => x.trim())
+          .filter((x) => x && !/^(•\s*)?(1st|2nd|3rd\+?)$|^View .* profile|^(Connect|Message|Follow|Status is)/.test(x));
+        return [{ url: a.href.split("?")[0], name: lines[0] ?? "", headline: lines[1] ?? "" }];
+      });
+    const rows = (await Promise.all(p.frames().map((f) => f.evaluate(read).catch(() => [])))).flat();
+    const co = company.toLowerCase();
+    for (const r of rows) {
+      if (!r.name || !r.headline.toLowerCase().includes(co) || out.some((o) => o.source === r.url)) continue;
+      out.push({ email: null, name: r.name.replace(/\s*Verified.*$/i, ""), role: r.headline.slice(0, 90), kind: "linkedin", source: r.url });
+    }
+    await sleep(1200);
+  }
+  return out;
+}
+
+/**
+ * Google, in the work tab of your real Chrome. Scripted HTTP gets a bot check
+ * from DuckDuckGo and a degraded index from Bing; a signed-in browser gets the
+ * real results. Falls back to Bing when Google shows its "unusual traffic" page.
+ */
+/**
+ * A human check ("I'm not a robot", Cloudflare's "Verify you are human") is
+ * handed to the user, never solved by script: bring the tab forward, notify,
+ * and wait for them to clear it. If nobody does within `waitMs`, stop asking
+ * for 15 minutes so a batch of lookups doesn't raise ten prompts.
+ */
+let humanCheckSnoozedUntil = 0;
+async function askHuman(p: Page, where: string, cleared: () => Promise<boolean>, waitMs = 120_000): Promise<boolean> {
+  if (Date.now() < humanCheckSnoozedUntil) return false;
+  await p.bringToFront().catch(() => {});
+  const msg = `${where} wants an "I'm not a robot" check. Solve it in the jobscout Chrome; the search waits 2 minutes.`;
+  spawn("osascript", ["-e", `display notification "${msg.replace(/"/g, "'")}" with title "jobscout needs you" sound name "Glass"`]).on("error", () => {});
+  const end = Date.now() + waitMs;
+  while (Date.now() < end) {
+    await sleep(2000);
+    if (await cleared().catch(() => false)) return true;
+  }
+  humanCheckSnoozedUntil = Date.now() + 15 * 60_000;
+  return false;
+}
+
+const HUMAN_CHECK = /verify you are human|are you a robot|i'm not a robot|unusual traffic|just a moment|checking your browser|captcha/i;
+
+const webSearch: Searcher = async (q, n = 10) => {
+  const p = await tab("work");
+  await p.goto(`https://www.google.com/search?q=${encodeURIComponent(q)}&num=${Math.max(n, 10)}&hl=en`, { waitUntil: "domcontentloaded" });
+  if (/\/sorry\//.test(p.url())) {
+    // Google's check redirects back to the results once it's solved.
+    const ok = await askHuman(p, "Google", async () => !/\/sorry\//.test(p.url()));
+    if (!ok) return bingSearch(q, n);
+  }
+  await p.waitForSelector("#search a h3, #botstuff", { timeout: 10000 }).catch(() => {});
+  const hits: WebHit[] = await p.evaluate(() =>
+    Array.from(document.querySelectorAll("#search a:has(h3)")).map((a) => {
+      const block = a.closest("[data-hveid], .g") as HTMLElement | null;
+      const title = (a.querySelector("h3") as HTMLElement).innerText;
+      const snippet = (block?.innerText ?? "").replace(title, "").replace(/\s+/g, " ").trim().slice(0, 400);
+      return { title, url: (a as HTMLAnchorElement).href, snippet };
+    }),
+  );
+  const seen = new Set<string>();
+  return hits.filter((h) => /^https?:/.test(h.url) && !/google\.[a-z.]+\//.test(h.url) && !seen.has(h.url) && seen.add(h.url)).slice(0, n);
+};
+
+/**
+ * People at a company from Google's index of LinkedIn profiles. No LinkedIn page
+ * loads, and Google's title line is a clean "Name - Role - Company". The snippet
+ * can describe a past job, so these are leads to check, not verified staff.
+ */
+async function googlePeople(company: string): Promise<Contact[]> {
+  const hits = await webSearch(`site:linkedin.com/in "${company}" recruiter OR "talent acquisition" OR "engineering manager" India`, 10).catch(() => []);
+  const co = company.toLowerCase();
+  return hits
+    .filter((h) => /linkedin\.com\/in\//.test(h.url) && `${h.title} ${h.snippet}`.toLowerCase().includes(co))
+    .map((h) => {
+      const [name, ...rest] = h.title.replace(/\s*[|·].*LinkedIn.*$/i, "").split(/\s+-\s+/);
+      return { email: null, name: name.trim(), role: rest.join(" - ").slice(0, 90) || h.snippet.slice(0, 90), kind: "linkedin" as const, source: h.url.split("?")[0] };
+    });
+}
+
+server.registerTool(
+  "companies_fit",
+  {
+    description:
+      "Rank companies worth a cold email: stack overlap with your profile, roles at your level in your cities, hiring momentum, volume. Board companies come from the jobscout DB (already-applied ones excluded); discover=true adds companies found on LinkedIn's job search that the board doesn't track. kind: 'open role' = something fits now, 'growing' = hiring your stack but nothing at your level yet (a good cold-email target), 'discovered' = outside the board.",
+    inputSchema: {
+      days: z.number().int().min(7).max(90).default(30),
+      limit: z.number().int().min(1).max(40).default(20),
+      discover: z.boolean().default(true),
+      roles: z.array(z.string()).max(4).default(["python developer", "backend developer", "full stack developer"]),
+    },
+  },
+  async ({ days, limit, discover, roles }) => {
+    const board = await boardFit(days).catch((e: Error) => e);
+    const known = new Set(board instanceof Error ? [] : board.map((b) => b.company.toLowerCase()));
+    const found = discover ? await discoverFit(roles, Math.min(days, 30), known) : [];
+    const all = [...(board instanceof Error ? [] : board), ...found].sort((a, b) => b.fit - a.fit).slice(0, limit);
+    const emailed = new Set(loadOutbox().filter((d) => d.status === "composed" || d.status === "sent").map((d) => d.company.toLowerCase()));
+    const lines = all.map((f, i) => formatFit(f, i + 1, days) + (emailed.has(f.company.toLowerCase()) ? "\n   (already emailed)" : ""));
+    const head = `${board instanceof Error ? `board unavailable: ${board.message}` : `${board.length} board companies`}, ${found.length} discovered · fit | company | kind | roles | trend | stack | cities`;
+    return text(`${head}\n${lines.join("\n")}`);
+  },
+);
+
+server.registerTool(
+  "salary_lookup",
+  {
+    description:
+      "What a company pays for a role in India, from AmbitionBox, Glassdoor, Levels.fyi, 6figr, Naukri and Indeed: searches each through Google in the logged-in Chrome, reads pay figures from the results (and the AmbitionBox / Levels.fyi pages themselves when deep), and returns every figure with its source, the sentence it came from and the URL, plus a median and whether it clears the PAY_OVERRIDE_LPA floor. Location-aware: pass jobId (company and city come from the posting) or city; figures naming another city are not counted, and the median uses only that city's figures when there are at least two, else India-wide, and says which. Figures for other titles, 7+ years, or 2.5x off the rest are listed but not counted. Cached per company and city for 60 days; jobs_search shows the estimate on matching rows and uses it for the location override. About 4 Google searches per call, so a handful of companies per session.",
+    inputSchema: {
+      jobId: z.string().optional().describe("a LinkedIn jobId: company and city are taken from the posting"),
+      company: z.string().optional(),
+      role: z.string().default("software engineer").describe("the title as these sites list it: 'software engineer', 'backend developer', 'sde 2'"),
+      city: z.string().optional().describe("the job's city; figures for other cities are not counted"),
+      deep: z.boolean().default(true).describe("also open the AmbitionBox and Levels.fyi pages"),
+    },
+  },
+  async ({ jobId, company: co, role, city: at, deep }) => {
+    let company = co;
+    let city = at;
+    if (jobId) {
+      const d = await guestDetail(jobId);
+      company ??= d.company;
+      // "Pune Division, Maharashtra, India" -> "Pune": the sites title their pages by the plain city name.
+      city ??= cityOf(d.location) ? d.location.split(",")[0].replace(/\s+(Division|District|City|East|West|South|North|Metropolitan Region)$/i, "") : undefined;
+    }
+    if (!company) return text("Give a company or a jobId.");
+    const e = await lookupSalary(company, role, city, webSearch, deep ? readPage : null).catch((err: Error) => err);
+    if (e instanceof Error) return text(`Salary lookup for ${company} failed, nothing cached: ${e.message}`);
+    return text(formatEstimate(e, payFloorLpa()));
+  },
+);
+
+server.registerTool(
+  "web_search",
+  {
+    description:
+      "Search the open web (Google in your real Chrome, Bing as fallback) and return title, URL and snippet per hit. Use for finding companies (e.g. 'site:wellfound.com python startup pune'), a company's domain, team pages or public hiring contacts. Keep it to a handful of queries per task; bursts get throttled.",
+    inputSchema: { query: z.string(), n: z.number().int().min(1).max(20).default(8) },
+  },
+  async ({ query, n }) => {
+    const hits = await webSearch(query, n);
+    if (!hits.length) return text("No results (or throttled; wait a minute).");
+    return text(hits.map((h, i) => `${i + 1}. ${h.title}\n   ${h.url}\n   ${h.snippet.slice(0, 200)}`).join("\n"));
+  },
+);
+
+server.registerTool(
+  "contacts_find",
+  {
+    description:
+      "Public hiring contacts at a company, each with the page it was found on: emails from the company's own careers/contact/team pages, its GitHub org and web search hits on '@domain'; plus engineering managers and recruiters from LinkedIn people search and Google's index of LinkedIn profiles (names and profiles, no emails; check they still work there). Never guesses addresses. Give domain when known; otherwise it's resolved by web search.",
+    inputSchema: {
+      company: z.string(),
+      domain: z.string().optional().describe("e.g. celigo.com"),
+      linkedin: z.boolean().default(true).describe("also search LinkedIn people (uses the logged-in browser, two page loads)"),
+    },
+  },
+  async ({ company, domain, linkedin }) => {
+    const d = (domain ?? (await resolveDomain(company, webSearch)))?.replace(/^https?:\/\//, "").replace(/^www\./, "").replace(/\/.*$/, "");
+    if (!d) return text(`Couldn't find a website for ${company}. Pass domain.`);
+    // Sequential: Google and LinkedIn both drive the work tab.
+    const web = await webContacts(d, company, webSearch);
+    const people = linkedin ? await linkedinPeople(company, ["engineering manager", "talent acquisition"]).catch(() => [] as Contact[]) : [];
+    const viaGoogle = await googlePeople(company);
+    const slug = (u: string) => u.match(/\/in\/([^/?#]+)/)?.[1] ?? u;
+    const ppl = [...(people === "login" ? [] : people), ...viaGoogle].filter(
+      (c, i, all) => all.findIndex((o) => slug(o.source) === slug(c.source)) === i,
+    );
+    saveResearch("contacts", company, [...web.contacts, ...ppl].map((c) => ({ ...c, domain: d })));
+    const lines = [...web.contacts, ...ppl].map(
+      (c) => `${c.kind} | ${c.email ?? "-"} | ${c.name ?? ""}${c.role ? ` (${c.role})` : ""} | ${c.source}`,
+    );
+    return text(
+      [
+        `${company} · ${d} · ${web.contacts.length} public emails from ${web.checked.length} pages + web, ${ppl.length} LinkedIn people${people === "login" ? " (LinkedIn logged out)" : ""}`,
+        "kind | email | name (role) | source",
+        ...(lines.length ? lines : ["nothing public found"]),
+      ].join("\n"),
+    );
+  },
+);
+
+server.registerTool(
+  "email_draft",
+  {
+    description:
+      `Save a cold email to the local outbox (~/.jobscout/outreach). Write the subject and body yourself: short, specific to the company, no placeholders. Returns an id and any warnings (already emailed this company in 45 days, daily cap ${DAILY_CAP}, too long). Nothing leaves the machine.`,
+    inputSchema: {
+      company: z.string(),
+      to: z.string().email(),
+      toName: z.string().optional(),
+      subject: z.string().min(3),
+      body: z.string().min(20),
+      resume: z.string().optional().describe("resume key from applicant.json (backend, fullstack) or a path; default from applicant.json"),
+      source: z.string().optional().describe("where the address was found"),
+    },
+  },
+  async (a) => {
+    const all = loadOutbox();
+    const domain = a.to.split("@")[1].toLowerCase();
+    const warn = outboxCheck(a.to.toLowerCase(), domain, a.body, all);
+    const r = resumePath(a.resume, loadBank());
+    const d: Draft = {
+      id: `e${all.length + 1}`,
+      company: a.company,
+      domain,
+      to: a.to.toLowerCase(),
+      toName: a.toName ?? null,
+      subject: a.subject,
+      body: a.body,
+      resume: r,
+      status: "draft",
+      createdAt: new Date().toISOString(),
+      source: a.source,
+    };
+    saveOutbox([...all, d]);
+    return text(
+      `${d.id} saved · to ${d.to} · resume ${r ? basename(r) : "NONE (not found)"}${warn.length ? `\nWARN: ${warn.join("; ")}` : ""}\nSubject: ${d.subject}\n\n${d.body}`,
+    );
+  },
+);
+
+server.registerTool(
+  "email_outbox",
+  {
+    description: "List outbox emails, newest first: id, status (draft/composed/sent/skipped), company, recipient, subject.",
+    inputSchema: { status: z.enum(["draft", "composed", "sent", "skipped", "all"]).default("all"), limit: z.number().int().default(30) },
+  },
+  async ({ status, limit }) => {
+    const rows = loadOutbox().filter((d) => status === "all" || d.status === status).reverse().slice(0, limit);
+    return text(rows.length ? rows.map((d) => `${d.id} | ${d.status} | ${d.company} | ${d.to} | ${d.subject}`).join("\n") : "Outbox empty.");
+  },
+);
+
+/**
+ * Opens Gmail's full-window compose with to/subject/body prefilled from the URL,
+ * attaches the résumé through the compose window's file input, and leaves it.
+ * Gmail autosaves it to Drafts, so it survives the tab closing.
+ */
+async function gmailCompose(d: Draft): Promise<{ ok: boolean; account: string; attached: boolean; note: string }> {
+  const p = await tab("mail");
+  const u = new URL("https://mail.google.com/mail/u/0/");
+  u.searchParams.set("view", "cm");
+  u.searchParams.set("fs", "1");
+  u.searchParams.set("tf", "1");
+  u.searchParams.set("to", d.toName ? `${d.toName} <${d.to}>` : d.to);
+  u.searchParams.set("su", d.subject);
+  u.searchParams.set("body", d.body);
+  await p.goto(u.href, { waitUntil: "domcontentloaded" });
+  if (/accounts\.google\.com|ServiceLogin/.test(p.url())) return { ok: false, account: "", attached: false, note: "Gmail is signed out in the jobscout Chrome. Sign in there once." };
+  const body = p.locator("div[aria-label='Message Body'][contenteditable=true]").first();
+  await body.waitFor({ state: "visible", timeout: 25000 });
+  const account = (await p.title()).match(/[\w.+-]+@[\w.-]+/)?.[0] ?? "";
+  let attached = false;
+  if (d.resume) {
+    const name = basename(d.resume);
+    await p.locator("input[type=file][name=Filedata]").first().setInputFiles(d.resume);
+    for (let i = 0; i < 60 && !attached; i++) {
+      attached = await p.locator(`[aria-label*="${name}"], div:has-text("${name}")`).first().isVisible().catch(() => false);
+      if (!attached) await sleep(250);
+    }
+  }
+  // Give autosave a beat so the draft exists server-side before anything else touches the tab.
+  await sleep(2500);
+  return { ok: true, account, attached, note: "" };
+}
+
+server.registerTool(
+  "email_compose",
+  {
+    description:
+      "Open an outbox email in Gmail (mail.google.com, the jobscout Chrome's signed-in account) as a compose window with recipient, subject, body and résumé filled in. Does NOT send: it stays in Gmail Drafts for the user to review and send. Marks the outbox entry 'composed'.",
+    inputSchema: { id: z.string() },
+  },
+  async ({ id }) => {
+    const all = loadOutbox();
+    const d = all.find((x) => x.id === id);
+    if (!d) return text(`No outbox email ${id}.`);
+    if (d.status === "sent") return text(`${id} was already sent on ${d.sentAt?.slice(0, 10)}.`);
+    const r = await gmailCompose(d);
+    if (!r.ok) return text(r.note);
+    d.status = "composed";
+    d.composedAt = new Date().toISOString();
+    saveOutbox(all);
+    return text(
+      `${id} open in Gmail as a draft from ${r.account || "(account not shown)"} to ${d.to}. Résumé ${d.resume ? (r.attached ? `attached (${basename(d.resume)})` : "NOT confirmed attached, check before sending") : "none"}.\nReview it in the Chrome window and press Send, then email_mark ${id} sent.`,
+    );
+  },
+);
+
+server.registerTool(
+  "email_send",
+  {
+    description:
+      "Click Send on the Gmail compose window email_compose opened for this id. Call ONLY when the user has explicitly told you to send this specific email; the default is that they send it themselves.",
+    inputSchema: { id: z.string(), confirm: z.literal(true) },
+  },
+  async ({ id }) => {
+    const all = loadOutbox();
+    const d = all.find((x) => x.id === id);
+    if (!d || d.status !== "composed") return text(`${id} isn't composed in Gmail. Run email_compose first.`);
+    const p = await tab("mail");
+    const shownTo = await p.locator(`[email="${d.to}"], span:has-text("${d.to}")`).count().catch(() => 0);
+    if (!/mail\.google\.com/.test(p.url()) || !shownTo) return text(`The mail tab isn't showing ${id}'s draft any more. Send it from Gmail Drafts, then email_mark ${id} sent.`);
+    await p.locator("div[role=button][aria-label^='Send']").first().click();
+    const sent = await p.getByText(/Message sent/i).first().waitFor({ timeout: 15000 }).then(() => true, () => false);
+    if (sent) {
+      d.status = "sent";
+      d.sentAt = new Date().toISOString();
+      saveOutbox(all);
+    }
+    return text(sent ? `SENT ${id} to ${d.to}.` : `UNCONFIRMED: no "Message sent" from Gmail. Check Sent before retrying.`);
+  },
+);
+
+server.registerTool(
+  "email_mark",
+  {
+    description: "Record what happened to an outbox email: 'sent' after the user sent it from Gmail, 'skipped' to drop it. Keeps the 45-day no-repeat rule accurate.",
+    inputSchema: { id: z.string(), status: z.enum(["sent", "skipped", "draft"]) },
+  },
+  async ({ id, status }) => {
+    const all = loadOutbox();
+    const d = all.find((x) => x.id === id);
+    if (!d) return text(`No outbox email ${id}.`);
+    d.status = status;
+    if (status === "sent") d.sentAt = new Date().toISOString();
+    saveOutbox(all);
+    return text(`${id} marked ${status}.`);
+  },
+);
+
+/**
+ * Types a LinkedIn message for a person and leaves it unsent, in a tab of its
+ * own so several can queue up for review. Uses the profile's Message button
+ * when it opens a free message (open profiles, 1st-degree), otherwise Connect
+ * with a note. Free accounts get 200 characters and a few notes a month there.
+ */
+async function linkedinCompose(url: string, subject: string, note: string, mode: "auto" | "connect"): Promise<{ route: string; note: string }> {
+  const p = await (await context()).newPage();
+  // No step on a LinkedIn tab should wait Playwright's default 30s: an element
+  // that isn't there in 8s isn't coming.
+  p.setDefaultTimeout(8000);
+  const slug = url.match(/\/in\/([^/?#]+)/)?.[1];
+  if (!slug) return { route: "error", note: "not a linkedin.com/in/ profile URL" };
+  await p.goto(`https://www.linkedin.com/in/${slug}/`, { waitUntil: "domcontentloaded" });
+  if (/authwall|login/.test(p.url())) return { route: "error", note: "LinkedIn is logged out in the jobscout Chrome." };
+  const top = p.locator("main section").first();
+  await top.waitFor({ timeout: 15000 }).catch(() => {});
+
+  const msg = top.getByRole("link", { name: /^Message$/ }).or(top.getByRole("button", { name: /^Message/ })).first();
+  if (mode === "auto" && (await msg.isVisible().catch(() => false))) {
+    await msg.click();
+    const box = p.getByRole("textbox", { name: /Write a message/i }).last();
+    const ok = await box.waitFor({ timeout: 8000 }).then(() => true, () => false);
+    // Anything that isn't a 1st-degree chat or labelled "Free message" spends an
+    // InMail credit. LinkedIn doesn't always say "InMail" in the compose window.
+    const free = await p.getByText(/^\s*Free message/i).first().isVisible().catch(() => false);
+    const firstDegree = await top.getByText(/^\s*·?\s*1st\s*$/).first().isVisible().catch(() => false);
+    const paid = !(free || firstDegree);
+    if (ok && !paid) {
+      const subj = p.getByRole("textbox", { name: /Subject/i }).last();
+      if (subject && (await subj.isVisible().catch(() => false))) await subj.fill(subject);
+      await box.fill(note);
+      return { route: "message", note: "" };
+    }
+    await p.keyboard.press("Escape").catch(() => {});
+  }
+
+  if (note.length > 200) return { route: "error", note: `No free message for this profile, and a connection note is capped at 200 characters (this one is ${note.length}). Shorten it.` };
+
+  // The profile and its dialogs can render in the page or in LinkedIn's iframe, so look in every frame.
+  const inFrames = async <T>(fn: (f: import("playwright-core").Frame) => Promise<T | null>, tries = 30): Promise<T | null> => {
+    for (let i = 0; i < tries; i++) {
+      for (const f of p.frames()) {
+        const r = await fn(f).catch(() => null);
+        if (r) return r;
+      }
+      await sleep(250);
+    }
+    return null;
+  };
+  const visible = async (l: import("playwright-core").Locator) => ((await l.isVisible()) ? l : null);
+
+  // Only ever the invite labelled with this person's name: the sidebar's
+  // "People also viewed" cards carry their own "Invite X to connect" buttons.
+  // The tab title is "Name | LinkedIn" on every layout; the h1 isn't always there.
+  let owner: string | null = null;
+  for (let i = 0; i < 20 && !owner; i++) {
+    owner = (await p.title()).match(/^(?:\(\d+\)\s*)?(.+?)\s*\|\s*LinkedIn/)?.[1]?.trim() ?? null;
+    if (!owner) await sleep(250);
+  }
+  owner ??= await inFrames(async (f) => {
+    const h = f.locator("h1").first();
+    return (await h.isVisible()) ? (await h.innerText({ timeout: 1000 })).trim() || null : null;
+  }, 8);
+  if (!owner) return { route: "error", note: "Couldn't read the profile name, so didn't look for Connect." };
+  const invite = `[aria-label="Invite ${owner.replace(/"/g, '\\"')} to connect"]`;
+  let connect = await inFrames(async (f) => visible(f.locator(invite).first()), 8);
+  if (!connect) {
+    // The profile's overflow is the icon-only button labelled "More". The global
+    // nav also has a "More", but it carries visible text, so require none.
+    const more = await inFrames(async (f) => {
+      const all = f.locator("button[aria-label='More']").filter({ hasNotText: /\w/ });
+      for (let i = 0; i < Math.min(await all.count(), 6); i++) if (await all.nth(i).isVisible()) return all.nth(i);
+      return null;
+    }, 8);
+    // A DOM click: LinkedIn's sticky nav overlaps the button once the page has scrolled.
+    if (more) await more.evaluate((e) => (e as HTMLElement).click());
+    connect = await inFrames(async (f) => {
+      const byLabel = await visible(f.locator(invite).first());
+      if (byLabel) return byLabel;
+      // Menu entries sometimes carry only the text. Inside an open menu it can only mean this profile.
+      return visible(f.locator("[role=menu] [role=menuitem], [role=menu] [role=button], .artdeco-dropdown__content--is-open [role=button]").filter({ hasText: /^\s*Connect\s*$/ }).first());
+    }, 12);
+  }
+  if (!connect) {
+    const pending = await inFrames(async (f) => visible(f.getByRole("button", { name: /^Pending/ }).first()), 4);
+    return { route: "error", note: pending ? `A request to ${owner} is already pending.` : `No Connect option for ${owner} (already connected, or LinkedIn only offers Follow).` };
+  }
+  await connect.evaluate((e) => (e as HTMLElement).click());
+  const addNote = await inFrames(async (f) => visible(f.getByRole("button", { name: /Add a (free )?note/i }).first()));
+  if (addNote) await addNote.evaluate((e) => (e as HTMLElement).click());
+  const area = await inFrames(async (f) => visible(f.locator("[role=dialog] textarea, textarea[name=message]").first()));
+  if (!area) {
+    const dialog = await inFrames(async (f) => {
+      const d = f.getByRole("dialog").first();
+      return (await d.isVisible()) ? (await d.innerText({ timeout: 1000 })).replace(/\s+/g, " ").slice(0, 300) : null;
+    }, 8);
+    return { route: "error", note: `Connect opened for ${owner} but no note box. Dialog says: ${dialog ?? "(no dialog found)"}. Nothing was sent; check the tab.` };
+  }
+  await area.fill(note);
+  return { route: "connect note", note: "" };
+}
+
+server.registerTool(
+  "linkedin_message",
+  {
+    description:
+      "Type a LinkedIn message to a person (profile URL from contacts_find) and leave it UNSENT in its own Chrome tab for the user to review and send. Uses a free message only for 1st-degree connections or profiles LinkedIn labels \"Free message\" (never spends InMail), else a connection request with a note (max 200 chars, so keep notes that short unless the profile is open). Logged in the outbox so the same person isn't messaged twice.",
+    inputSchema: {
+      company: z.string(),
+      profile: z.string().describe("https://www.linkedin.com/in/<slug>"),
+      name: z.string().optional(),
+      subject: z.string().default("").describe("used only for free messages"),
+      note: z.string().min(20).max(1900),
+      mode: z.enum(["auto", "connect"]).default("auto").describe("connect: always a connection request with the note, even when a message is possible"),
+    },
+  },
+  async (a) => {
+    const all = loadOutbox();
+    const to = `linkedin:${a.profile.match(/\/in\/([^/?#]+)/)?.[1] ?? a.profile}`;
+    const warn = outboxCheck(to, a.company.toLowerCase(), a.note, all);
+    if (warn.some((w) => w.startsWith("already"))) return text(`Skipped: ${warn.join("; ")}`);
+    const r = await Promise.race([
+      linkedinCompose(a.profile, a.subject, a.note, a.mode),
+      sleep(60000).then(() => ({ route: "error", note: "Gave up after 60s. Nothing was sent; check the tab it opened." })),
+    ]);
+    if (r.route === "error") return text(r.note);
+    const d: Draft = {
+      id: `e${all.length + 1}`,
+      channel: "linkedin",
+      company: a.company,
+      domain: a.company.toLowerCase(),
+      to,
+      toName: a.name ?? null,
+      subject: a.subject,
+      body: a.note,
+      resume: null,
+      status: "composed",
+      createdAt: new Date().toISOString(),
+      composedAt: new Date().toISOString(),
+      source: a.profile,
+    };
+    saveOutbox([...all, d]);
+    return text(`${d.id} typed as a ${r.route} to ${a.name ?? to}, unsent, in its own tab. Send it there, then email_mark ${d.id} sent.${warn.length ? `\nWARN: ${warn.join("; ")}` : ""}`);
+  },
+);
+
+server.registerTool(
+  "page_controls",
+  {
+    description:
+      "Read-only: open a URL in the work tab and list its buttons, links and menu items (role, aria-label, text) across all frames, optionally filtered by a regex. Clicks nothing. For checking what a page actually labels its controls before automating it.",
+    inputSchema: {
+      url: z.string().optional().describe("omit to read the work tab as it is"),
+      match: z.string().optional().describe("case-insensitive regex over label and text, e.g. 'connect|more|note'"),
+      limit: z.number().int().default(40),
+    },
+  },
+  async ({ url, match, limit }) => {
+    const p = await tab("work");
+    if (url) {
+      await p.goto(url, { waitUntil: "domcontentloaded" });
+      await p.waitForLoadState("load", { timeout: 8000 }).catch(() => {});
+      await sleep(1500);
+    }
+    const re = match ? new RegExp(match, "i") : null;
+    const rows: string[] = [];
+    for (const f of p.frames()) {
+      const items = await f
+        .evaluate(() =>
+          Array.from(document.querySelectorAll("button, a, [role=button], [role=menuitem], [role=link]")).map((e) => {
+            const el = e as HTMLElement;
+            const r = el.getBoundingClientRect();
+            return {
+              role: el.getAttribute("role") ?? el.tagName.toLowerCase(),
+              label: el.getAttribute("aria-label") ?? "",
+              text: el.innerText.replace(/\s+/g, " ").trim().slice(0, 60),
+              shown: r.width > 0 && r.height > 0,
+            };
+          }),
+        )
+        .catch(() => []);
+      const tag = f === p.mainFrame() ? "main" : `frame ${new URL(f.url() || "about:blank").pathname.slice(0, 30)}`;
+      for (const i of items) {
+        if (re && !re.test(`${i.label} ${i.text}`)) continue;
+        rows.push(`${tag} | ${i.role} | ${i.label || "-"} | ${i.text || "-"}${i.shown ? "" : " | hidden"}`);
+      }
+    }
+    return text(`${await p.title()} | ${p.url()}\nframe | role | aria-label | text\n${rows.slice(0, limit).join("\n") || "no matches"}`);
+  },
+);
+
+/**
+ * Positions from a LinkedIn /details/experience/ page's text, anchored on each
+ * date line ("Apr 2026 - Present · 8 mos"). Two shapes, as LinkedIn renders them:
+ *
+ *   single role             several roles at one company
+ *   SWE Intern              Harness
+ *   Traceable · Internship  1 yr 9 mos          <- group header + total span
+ *   Jul 2024 - Mar 2025     SDE 2
+ *                           Full-time           <- type alone
+ *                           Apr 2026 - Present
+ */
+interface Position { title: string; company: string; from: string; to: string; span: string; intern: boolean }
+const DATES = /^((?:[A-Z][a-z]{2} )?\d{4})\s*[-–]\s*(Present|(?:[A-Z][a-z]{2} )?\d{4})(?:\s*·\s*(.+))?$/;
+const EMP_TYPES = "Full-time|Part-time|Internship|Contract|Freelance|Self-employed|Apprenticeship|Trainee|Seasonal";
+const EMP_ALONE = new RegExp(`^(${EMP_TYPES})$`, "i");
+const CO_EMP = new RegExp(`^(.+?)\\s*·\\s*(${EMP_TYPES})$`, "i");
+/** A group header's span line: "1 yr 9 mos", or with the type first, "Full-time · 2 yrs 4 mos". */
+const SPAN_ONLY = new RegExp(`^((${"Full-time|Part-time|Internship|Contract|Freelance|Self-employed|Apprenticeship|Trainee|Seasonal"})\\s*·\\s*)?(\\d+ yrs?( \\d+ mos?)?|\\d+ mos?)$`, "i");
+const NOT_ROLE = /(^|·\s*)(On-site|Remote|Hybrid)$|,\s*India\b|\b(Area|District|Metropolitan Region)\b|^Skills:|\+\d+ skills$|skills$/i;
+function parseExperience(textBlock: string): Position[] {
+  const all = textBlock.split("\n").map((l) => l.trim()).filter(Boolean);
+  const end = all.findIndex((l) => /^(More profiles for you|People you may know|Explore Premium profiles)$/.test(l));
+  // Locations ("Pune District, Maharashtra, India · On-site", "Remote") and skill
+  // lines are never a title or company; dropping them first keeps the
+  // look-back below from landing on one.
+  const lines = (end > 0 ? all.slice(0, end) : all).filter((l) => !NOT_ROLE.test(l));
+  const out: Position[] = [];
+  let header = "";
+  for (let i = 0; i < lines.length; i++) {
+    if (SPAN_ONLY.test(lines[i + 1] ?? "") && !DATES.test(lines[i])) {
+      header = lines[i];
+      continue;
+    }
+    const m = lines[i].match(DATES);
+    if (!m) continue;
+    const l1 = lines[i - 1] ?? "";
+    let title: string, company: string, type = "";
+    const co = l1.match(CO_EMP);
+    if (co) {
+      [title, company, type] = [lines[i - 2] ?? "", co[1], co[2]];
+      header = "";
+    } else if (EMP_ALONE.test(l1)) {
+      [title, company, type] = [lines[i - 2] ?? "", header || (lines[i - 3] ?? ""), l1];
+    } else if (header && (SPAN_ONLY.test(lines[i - 2] ?? "") || DATES.test(lines[i - 2] ?? ""))) {
+      // Inside a group: the line above is the title, the group header the company.
+      [title, company] = [l1, header];
+    } else {
+      // A single role with no type line is "Title / Company / dates".
+      [title, company] = [lines[i - 2] ?? "", l1];
+      header = "";
+    }
+    out.push({ title, company, from: m[1], to: m[2], span: m[3] ?? "", intern: /intern|trainee|apprentice/i.test(`${type} ${title}`) });
+  }
+  return out;
+}
+
+function monthsAgo(d: string): number | null {
+  const m = d.match(/^(?:([A-Z][a-z]{2}) )?(\d{4})$/);
+  if (!m) return null;
+  const mon = m[1] ? "JanFebMarAprMayJunJulAugSepOctNovDec".indexOf(m[1]) / 3 : 0;
+  const now = new Date();
+  return (now.getFullYear() - +m[2]) * 12 + (now.getMonth() - mon);
+}
+
+server.registerTool(
+  "people_switched",
+  {
+    description:
+      "Who recently joined a company as an engineer, and where they came from: finds engineers there via Google's index of LinkedIn profiles, reads each one's Experience page in the logged-in browser, and keeps those whose current role at the company started within `months`. Per person: title they joined as, start date, previous company/title/tenure, total years before joining. Recent joiners are also the likeliest referrers. Reads up to `max` profiles (each one LinkedIn page load), so keep max small.",
+    inputSchema: {
+      company: z.string(),
+      // A bare phrase: with an "(a OR b OR c)" group Google returned nothing for six companies in a row.
+      roles: z.string().default("software engineer").describe("Google terms for the title; keep it one phrase"),
+      months: z.number().int().min(1).max(36).default(12),
+      max: z.number().int().min(1).max(15).default(8),
+    },
+  },
+  async ({ company, roles, months, max }) => {
+    const hits = await webSearch(`site:linkedin.com/in "${company}" ${roles} India`, 20).catch(() => []);
+    const co = company.toLowerCase();
+    const profiles = [...new Map(
+      hits
+        .filter((h) => /linkedin\.com\/in\//.test(h.url) && `${h.title} ${h.snippet}`.toLowerCase().includes(co))
+        .map((h) => [h.url.match(/\/in\/([^/?#]+)/)?.[1] ?? h.url, h] as const),
+    ).entries()].slice(0, max);
+    if (!profiles.length) return text(`No LinkedIn profiles for ${company} in Google's results.`);
+
+    const p = await tab("work");
+    const rows: string[] = [];
+    const found: object[] = [];
+    let earlier = 0;
+    let unreadable = 0;
+    for (const [slug, h] of profiles) {
+      await p.goto(`https://www.linkedin.com/in/${slug}/details/experience/`, { waitUntil: "domcontentloaded" });
+      if (/authwall|login|checkpoint/.test(p.url())) return text("LinkedIn is logged out (or asking for a check) in the jobscout Chrome.");
+      await p.waitForLoadState("load", { timeout: 8000 }).catch(() => {});
+      await sleep(1200);
+      const body = (await Promise.all(p.frames().map((f) => f.evaluate(() => (document.querySelector("main") as HTMLElement | null)?.innerText ?? "").catch(() => "")))).join("\n");
+      const pos = parseExperience(body);
+      const key = co.split(/\s+/)[0];
+      const here = pos.filter((x) => x.company.toLowerCase().includes(key));
+      if (!here.some((x) => x.to === "Present")) {
+        unreadable++;
+        continue;
+      }
+      // Joined = the earliest role at the company. A promotion starts a new
+      // title, not a new job, and must not read as a switch.
+      const first = here[here.length - 1];
+      const now = here[0];
+      const ago = monthsAgo(first.from);
+      if (ago == null || ago > months) {
+        earlier++;
+        continue;
+      }
+      const joinedAgo = ago;
+      const before = pos.filter((x) => !x.company.toLowerCase().includes(key) && (monthsAgo(x.from) ?? 0) >= joinedAgo);
+      const prev = before.find((x) => !x.intern) ?? before[0];
+      const ft = before.filter((x) => !x.intern).map((x) => monthsAgo(x.from) ?? 0);
+      const yrs = ft.length ? ((Math.max(...ft) - joinedAgo) / 12).toFixed(1) : "0";
+      const name = h.title.split(/\s+[-|–]\s+/)[0];
+      found.push({
+        name, profile: `https://www.linkedin.com/in/${slug}`, joined: first.from, joinedAs: first.title, joinedAsIntern: first.intern,
+        now: now.title, previous: prev ? { title: prev.title, company: prev.company, from: prev.from, to: prev.to, intern: prev.intern } : null,
+        fullTimeYearsBefore: +yrs, path: before.slice(0, 4).map((x) => x.company),
+      });
+      rows.push(
+        `${name} | joined ${first.from} as ${first.title}${first.intern ? " (intern)" : ""}${now !== first ? `, now ${now.title}` : ""}` +
+          ` | before: ${prev ? `${prev.title} @ ${prev.company} (${prev.from}-${prev.to}${prev.intern ? ", intern" : ""})` : "nothing (fresher)"}` +
+          ` | ${yrs}y full-time before | path: ${before.slice(0, 3).map((x) => x.company).join(" < ") || "-"} | linkedin.com/in/${slug}`,
+      );
+      await sleep(1500);
+    }
+    saveResearch("joiners", company, found);
+    return text(
+      `${company}: ${rows.length} joined in the last ${months} months, ${earlier} joined earlier, ${unreadable} couldn't be read (left, or page shape not parsed), from ${profiles.length} profiles\n` +
+        (rows.join("\n") || "none recent in this sample"),
+    );
+  },
+);
+
+server.registerTool(
+  "linkedin_reply",
+  {
+    description:
+      "Type a reply in an EXISTING LinkedIn conversation (the person has messaged before, so it's free, never InMail), optionally attach a résumé, and leave it UNSENT in its own tab for the user to send. Refuses when there's no prior conversation.",
+    inputSchema: {
+      company: z.string(),
+      profile: z.string().describe("https://www.linkedin.com/in/<slug>"),
+      name: z.string().optional(),
+      note: z.string().min(2).max(3000),
+      resume: z.string().optional().describe("attach this résumé (key from applicant.json: backend, fullstack, or a path); omit for no attachment"),
+    },
+  },
+  async (a) => {
+    const slug = a.profile.match(/\/in\/([^/?#]+)/)?.[1];
+    if (!slug) return text("Not a linkedin.com/in/ profile URL.");
+    const p = await (await context()).newPage();
+    p.setDefaultTimeout(8000);
+    const run = async (): Promise<string> => {
+      await p.goto(`https://www.linkedin.com/in/${slug}/`, { waitUntil: "domcontentloaded" });
+      if (/authwall|login/.test(p.url())) return "LinkedIn is logged out in the jobscout Chrome.";
+      const msg = p.getByRole("link", { name: /^Message$/ }).or(p.getByRole("button", { name: /^Message/ })).first();
+      await msg.waitFor({ timeout: 15000 });
+      await msg.evaluate((e) => (e as HTMLElement).click());
+      const box = p.getByRole("textbox", { name: /Write a message/i }).last();
+      await box.waitFor({ timeout: 10000 });
+      // A thread with history shows "<name> sent the following message(s)"; a fresh compose
+      // (which would be InMail for a non-connection) doesn't.
+      await sleep(1500);
+      const history = await p.getByText(/sent the following messages?/i).first().isVisible().catch(() => false);
+      if (!history) {
+        await p.keyboard.press("Escape").catch(() => {});
+        return "No earlier conversation with this person, so a reply here would be a new (possibly InMail) message. Nothing typed.";
+      }
+      await box.fill(a.note);
+      let attached = "no résumé";
+      // Only when asked: a "thanks anyway" shouldn't carry a résumé.
+      const file = a.resume !== undefined ? resumePath(a.resume, loadBank()) : null;
+      if (file) {
+        const input = p.locator("form input[type=file], .msg-form input[type=file], input[type=file]").last();
+        await input.setInputFiles(file);
+        const name = basename(file);
+        let ok = false;
+        for (let i = 0; i < 40 && !ok; i++) {
+          ok = await p.getByText(name, { exact: false }).first().isVisible().catch(() => false);
+          if (!ok) await sleep(250);
+        }
+        attached = ok ? `attached ${name}` : `résumé NOT confirmed attached (${name}); check before sending`;
+      }
+      return `Reply typed to ${a.name ?? slug}, ${attached}, unsent in its own tab. Review and press Send.`;
+    };
+    const r = await Promise.race([run(), sleep(60000).then(() => "Gave up after 60s. Nothing was sent; check the tab.")]).catch(
+      (e: Error) => `Failed: ${e.message.split("\n")[0]}. Nothing was sent.`,
+    );
+    if (r.startsWith("Reply typed")) {
+      const all = loadOutbox();
+      saveOutbox([
+        ...all,
+        {
+          id: `e${all.length + 1}`, channel: "linkedin", company: a.company, domain: a.company.toLowerCase(),
+          to: `linkedin:${slug}`, toName: a.name ?? null, subject: "", body: a.note, resume: null,
+          status: "composed", createdAt: new Date().toISOString(), composedAt: new Date().toISOString(), source: a.profile,
+        },
+      ]);
+    }
+    return text(r);
   },
 );
 

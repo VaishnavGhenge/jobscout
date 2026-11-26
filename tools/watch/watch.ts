@@ -25,7 +25,7 @@ import { db } from "@/db/client";
 import { jobAlerts } from "@/db/schema";
 import { refreshCompany } from "@/lib/refresh";
 import { isEngineeringRole, scoreJob } from "@/lib/scoring";
-import { locationVerdict } from "@/lib/location-pref";
+import { fitGate } from "@/lib/gate";
 import { guestDetail, pool, score as scoreLinkedIn, searchLinkedIn, type SearchOptions } from "../lib/linkedin";
 import searches from "./searches.json";
 
@@ -199,7 +199,7 @@ async function pollAts(state: State, cfg: Config): Promise<{ hits: Hit[]; change
         if (p.postedAt && Date.now() - p.postedAt.getTime() > cfg.maxAgeHours * 3600000) continue;
         const s = scoreJob(p, c);
         if (s.eligibility === "blocked" || s.score < cfg.threshold) continue;
-        if (!locationVerdict(p.location, p.description).ok) continue;
+        if (!fitGate({ title: p.title, location: p.location, description: p.description }).ok) continue;
         hits.push({
           source: c.ats,
           externalId: p.externalId,
@@ -230,7 +230,7 @@ async function pollLinkedIn(state: State, cfg: Config): Promise<{ hits: Hit[]; s
     const d = details[i];
     const s = scoreLinkedIn(c.title, c.location, d?.description ?? "");
     if (s.eligibility === "blocked" || s.score < cfg.threshold) return;
-    if (!locationVerdict(c.location, d?.description ?? "").ok) return;
+    if (!fitGate({ title: c.title, location: c.location, description: d?.description ?? "" }).ok) return;
     hits.push({
       source: "linkedin",
       externalId: c.jobId,

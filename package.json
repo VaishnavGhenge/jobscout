@@ -10,7 +10,7 @@
     "db:push": "drizzle-kit push",
     "db:generate": "drizzle-kit generate",
     "mcp:apply:build": "esbuild tools/apply-mcp/server.ts --bundle --platform=node --format=esm --packages=external --log-level=warning --outfile=tools/apply-mcp/dist/server.mjs",
-    "mcp:apply": "esbuild tools/apply-mcp/server.ts --bundle --platform=node --format=esm --packages=external --log-level=warning --outfile=tools/apply-mcp/dist/server.mjs && node tools/apply-mcp/dist/server.mjs",
+    "mcp:apply": "esbuild tools/apply-mcp/server.ts --bundle --platform=node --format=esm --packages=external --log-level=warning --outfile=tools/apply-mcp/dist/server.mjs && node --env-file-if-exists=.env tools/apply-mcp/dist/server.mjs",
     "watch:build": "esbuild tools/watch/watch.ts --bundle --platform=node --format=esm --packages=external --log-level=warning --outfile=tools/watch/dist/watch.mjs",
     "watch": "pnpm run watch:build && node --env-file=.env tools/watch/dist/watch.mjs"
   },
